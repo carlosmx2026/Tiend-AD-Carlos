@@ -19,7 +19,7 @@ const id=()=>crypto.randomBytes(4).toString('hex').toUpperCase();
 const money=(n:number)=>`$${n.toFixed(2)}`;
 const states=new Map<number,any>();
 const premium=(title:string,body:string)=>`✦ ${title}\n━━━━━━━━━━━━━━━━━━\n${body}\n━━━━━━━━━━━━━━━━━━\n◆ TIENDA DC`;
-const home=()=>Markup.inlineKeyboard([[Markup.button.callback('🛍 PREMIUM SHOP','shop')],[Markup.button.callback('💎 MY WALLET','wallet'),Markup.button.callback('📦 MY ORDERS','myorders')],[Markup.button.callback('🎧 SUPPORT','support')]]);
+const home=()=>Markup.inlineKeyboard([[Markup.button.callback('🛍 PREMIUM SHOP','shop')],[Markup.button.callback('💎 MI FONDO','wallet'),Markup.button.callback('📦 MY ORDERS','myorders')],[Markup.button.callback('🎧 SUPPORT','support')]]);
 const admin=()=>Markup.inlineKeyboard([[Markup.button.callback('📊 Dashboard','a_dash')],[Markup.button.callback('🛍 Products','a_products'),Markup.button.callback('➕ Add Product','a_add')],[Markup.button.callback('📦 Stock Manager','a_stock'),Markup.button.callback('🧾 Orders','a_orders')],[Markup.button.callback('👥 Users','a_users'),Markup.button.callback('📣 Broadcast','a_broadcast')],[Markup.button.callback('⚙️ Settings','a_settings')]]);
 function ensureUser(ctx:any){const d=load();const k=String(ctx.from.id);if(!d.users[k]){d.users[k]={id:ctx.from.id,username:ctx.from.username,balance:0,joinedAt:new Date().toISOString()};save(d);}return d.users[k];}
 bot.start(async ctx=>{ensureUser(ctx);await ctx.reply(premium('WELCOME TO TIENDA DC','⚡ Premium Digital Store\n🛡 Fast • Clean • Reliable\n\nChoose an option below.'),home());});
