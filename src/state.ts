@@ -4,7 +4,8 @@ export type State=null
 |{step:"balance_user";action:"add"|"remove"|"check"}|{step:"balance_amount";action:"add"|"remove";userId:number}
 |{step:"track_order"}|{step:"broadcast"}|{step:"coupon_code"}|{step:"coupon_percent";code:string}
 |{step:"help_title"}|{step:"help_content";id:string;title:string}|{step:"buy_qty";productId:string}
-|{step:"admin_add"}|{step:"admin_remove"};
+|{step:"admin_add"}|{step:"admin_remove"}|{step:"binance_uid"}|{step:"binance_name"}
+|{step:"deposit_amount"}|{step:"deposit_txid";amount:number};
 const states=new Map<number,State>();
 export const setState=(id:number,s:State)=>states.set(id,s);
 export const getState=(id:number)=>states.get(id)??null;
