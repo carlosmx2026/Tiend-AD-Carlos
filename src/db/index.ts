@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS referrals(referred_user_id BIGINT PRIMARY KEY,referre
 CREATE TABLE IF NOT EXISTS coupons(code TEXT PRIMARY KEY,percent NUMERIC(6,2) NOT NULL,active BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS help_items(id TEXT PRIMARY KEY,title TEXT NOT NULL,content TEXT NOT NULL,active BOOLEAN NOT NULL DEFAULT TRUE);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+ALTER TABLE deposits ADD COLUMN IF NOT EXISTS received_amount NUMERIC(14,4) NOT NULL DEFAULT 0;
+ALTER TABLE deposits ADD COLUMN IF NOT EXISTS credited_amount NUMERIC(14,4) NOT NULL DEFAULT 0;
+ALTER TABLE deposits ADD COLUMN IF NOT EXISTS verification_note TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS deposits_method_txid_unique ON deposits(method,LOWER(txid));
 `)}
 export async function ensureUser(id:number,username?:string,firstName?:string){await pool.query(`INSERT INTO users(id,username,first_name) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET username=EXCLUDED.username,first_name=EXCLUDED.first_name`,[id,username||"",firstName||""])}
 export async function getUser(id:number){return (await pool.query("SELECT * FROM users WHERE id=$1",[id])).rows[0]}
