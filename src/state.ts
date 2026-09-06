@@ -5,7 +5,7 @@ export type State=null
 |{step:"track_order"}|{step:"broadcast"}|{step:"coupon_code"}|{step:"coupon_percent";code:string}
 |{step:"help_title"}|{step:"help_content";id:string;title:string}|{step:"buy_qty";productId:string}|{step:"checkout";productId:string;quantity:number;total:number}
 |{step:"admin_add"}|{step:"admin_remove"}|{step:"binance_uid"}|{step:"binance_name"}
-|{step:"deposit_amount";method:"binance"|"bep20"|"trc20"}|{step:"deposit_txid";amount:number;method:"binance"|"bep20"|"trc20"}|{step:"setting_value";key:string;back:"admin_payment"|"admin_settings"}|{step:"supplier_pick";productId:string};
+|{step:"deposit_amount";method:"binance"|"bep20"|"trc20"}|{step:"deposit_txid";amount:number;method:"binance"|"bep20"|"trc20"}|{step:"setting_value";key:string;back:"admin_payment"|"admin_settings"}|{step:"supplier_pick";productId:string}|{step:"product_location";productId:string};
 const states=new Map<number,State>();
 export const setState=(id:number,s:State)=>states.set(id,s);
 export const getState=(id:number)=>states.get(id)??null;
