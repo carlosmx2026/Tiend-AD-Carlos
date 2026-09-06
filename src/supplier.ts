@@ -16,14 +16,16 @@ async function request(path:string,init:RequestInit={}){
 
 const list=(data:any):any[]=>Array.isArray(data)?data:Array.isArray(data?.products)?data.products:Array.isArray(data?.data)?data.data:Array.isArray(data?.data?.products)?data.data.products:[];
 
+let productCache:{at:number;items:SupplierProduct[]}|null=null;
 export async function eliteProducts():Promise<SupplierProduct[]>{
-  return list(await request("/products")).map((p:any)=>({
+  if(productCache&&Date.now()-productCache.at<15000)return productCache.items;
+  const items=list(await request("/products")).map((p:any)=>({
     id:String(p.id??p.productId??p.product_id??""),
     name:String(p.name??p.title??p.productName??"Unnamed product"),
     price:Number(p.price??p.unitPrice??0),
     stock:Number(p.stock??p.quantity??p.availableStock??p.available??0),
     description:String(p.description??"")
-  })).filter(p=>p.id);
+  })).filter(p=>p.id);productCache={at:Date.now(),items};return items;
 }
 
 export async function eliteProduct(id:string){return (await eliteProducts()).find(p=>p.id===id)||null}
@@ -38,6 +40,7 @@ function deliveries(data:any):string[]{
 
 export async function eliteOrder(productId:string,quantity:number){
   const data=await request("/order",{method:"POST",body:JSON.stringify({productId,quantity})});
+  productCache=null;
   const items=deliveries(data);
   if(items.length<quantity)throw new Error("Supplier accepted the order but did not return enough delivery items.");
   return {items:items.slice(0,quantity),supplierOrderId:String(data?.orderId??data?.data?.orderId??data?.id??"")};
