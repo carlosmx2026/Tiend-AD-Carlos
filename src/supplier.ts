@@ -1,4 +1,4 @@
-export type SupplierProduct={id:string;name:string;price:number;stock:number;description:string};
+export type SupplierProduct={id:string;name:string;price:number;stock:number;description:string;emojiId:string};
 
 const BASE="https://elite-tools-store.up.railway.app/api";
 const timeout=()=>AbortSignal.timeout(12000);
@@ -24,7 +24,8 @@ export async function eliteProducts():Promise<SupplierProduct[]>{
     name:String(p.name??p.title??p.productName??"Unnamed product"),
     price:Number(p.price??p.unitPrice??0),
     stock:Number(p.stock??p.quantity??p.availableStock??p.available??0),
-    description:String(p.description??"")
+    description:String(p.description??""),
+    emojiId:String(p.premiumEmojiId??p.premium_emoji_id??p.emojiId??p.icon_custom_emoji_id??"")
   })).filter(p=>p.id);productCache={at:Date.now(),items};return items;
 }
 
