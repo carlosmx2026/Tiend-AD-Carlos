@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 ALTER TABLE deposits ADD COLUMN IF NOT EXISTS received_amount NUMERIC(14,4) NOT NULL DEFAULT 0;
 ALTER TABLE deposits ADD COLUMN IF NOT EXISTS credited_amount NUMERIC(14,4) NOT NULL DEFAULT 0;
 ALTER TABLE deposits ADD COLUMN IF NOT EXISTS verification_note TEXT NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_product_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS supplier_name TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS deposits_method_txid_unique ON deposits(method,LOWER(txid));
 `)}
 export async function ensureUser(id:number,username?:string,firstName?:string){await pool.query(`INSERT INTO users(id,username,first_name) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET username=EXCLUDED.username,first_name=EXCLUDED.first_name`,[id,username||"",firstName||""])}
