@@ -12,9 +12,9 @@ export const PREMIUM_EMOJI = {
 const customEmojiPattern=/\{\s*(\d{10,})\s*\}/g;
 function explicitIcon(text:string){const match=text.match(/\{\s*(\d{10,})\s*\}/);return match?.[1]||null;}
 function icon(text:string){const custom=explicitIcon(text);if(custom)return custom;const t=text.toLowerCase();if(/back|home/.test(t))return PREMIUM_EMOJI.back;if(/wallet|balance|price|payment|deposit/.test(t))return PREMIUM_EMOJI.money;if(/shop|tool|product|stock|buy/.test(t))return PREMIUM_EMOJI.shop;if(/order|delivery/.test(t))return PREMIUM_EMOJI.orders;if(/track/.test(t))return PREMIUM_EMOJI.track;if(/support|help|ticket/.test(t))return PREMIUM_EMOJI.support;if(/remove|delete|disable|cancel|reject/.test(t))return PREMIUM_EMOJI.error;if(/confirm|done|success|enable|approve|add/.test(t))return PREMIUM_EMOJI.done;if(/user|profile|admin/.test(t))return PREMIUM_EMOJI.user;return PREMIUM_EMOJI.sparkle;}
-function style(text:string):"primary"|"success"|"danger"{const t=text.toLowerCase();if(/remove|delete|disable|cancel|reject/.test(t))return"danger";if(/buy|add|confirm|done|success|enable|approve|open/.test(t))return"success";return"primary";}
+function style(text:string):"primary"|"success"|"danger"{const t=text.toLowerCase();if(/^\s*🔴|remove|delete|disable|cancel|reject|out of stock/.test(t))return"danger";if(/buy|add|confirm|done|success|enable|approve|open/.test(t))return"success";return"primary";}
 function strip(text:string){return text.replace(customEmojiPattern,"").replace(/^\s*\d{10,}\}?\s*/,"").replace(/^[^\p{L}\p{N}]+/u,"").trim()||"Open";}
 export function cb(text:string,data:string):any{const b:any=Markup.button.callback(strip(text),data);b.icon_custom_emoji_id=icon(text);b.style=style(text);return b;}
 export function urlBtn(text:string,url:string):any{const b:any=Markup.button.url(strip(text),url);b.icon_custom_emoji_id=icon(text);b.style=style(text);return b;}
-export function cleanPremiumIds(text:string){return text.replace(customEmojiPattern,"✨").replace(/(^|\s)\d{10,}\}?(?=\s)/g,"$1✨");}
+export function cleanPremiumIds(text:string){return text.replace(customEmojiPattern,"✨");}
 export function box(title:string,body=""){return cleanPremiumIds(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${title}\n┃ 𝑺𝑻𝑶𝑹𝑬 𝑫𝑵 𝑪𝑨𝑹\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${body}${body?"\n":""}━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);}
