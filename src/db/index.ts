@@ -29,5 +29,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS deposits_method_txid_unique ON deposits(method
 export async function ensureUser(id:number,username?:string,firstName?:string){await pool.query(`INSERT INTO users(id,username,first_name) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET username=EXCLUDED.username,first_name=EXCLUDED.first_name`,[id,username||"",firstName||""])}
 export async function getUser(id:number){return (await pool.query("SELECT * FROM users WHERE id=$1",[id])).rows[0]}
 export async function getProducts(){return (await pool.query("SELECT * FROM products WHERE parent_id IS NULL ORDER BY sort_order,created_at,name")).rows}
+export async function getProductsWithStock(){return (await pool.query(`
+SELECT p.*,COALESCE(s.n,0)::int AS local_stock
+FROM products p
+LEFT JOIN (
+  SELECT product_id,COUNT(*)::int AS n FROM stock_items WHERE sold=FALSE GROUP BY product_id
+) s ON s.product_id=p.id
+WHERE p.parent_id IS NULL
+ORDER BY p.sort_order,p.created_at,p.name
+`)).rows}
 export async function getProduct(id:string){return (await pool.query("SELECT * FROM products WHERE id=$1",[id])).rows[0]}
 export async function stockCount(id:string){return (await pool.query("SELECT COUNT(*)::int n FROM stock_items WHERE product_id=$1 AND sold=FALSE",[id])).rows[0]?.n||0}
