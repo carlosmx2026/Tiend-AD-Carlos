@@ -1,7 +1,7 @@
 export type SupplierProduct={id:string;name:string;price:number;stock:number;description:string;emojiId:string};
 
 const BASE="https://elite-tools-store.up.railway.app/api";
-const timeout=()=>AbortSignal.timeout(12000);
+const timeout=()=>AbortSignal.timeout(5000);
 const apiKey=()=>String(process.env.ELITE_SUPPLIER_API_KEY||"").trim();
 
 async function request(path:string,init:RequestInit={}){
@@ -17,9 +17,12 @@ async function request(path:string,init:RequestInit={}){
 const list=(data:any):any[]=>Array.isArray(data)?data:Array.isArray(data?.products)?data.products:Array.isArray(data?.data)?data.data:Array.isArray(data?.data?.products)?data.data.products:[];
 
 let productCache:{at:number;items:SupplierProduct[]}|null=null;
+let productsInFlight:Promise<SupplierProduct[]>|null=null;
 export async function eliteProducts():Promise<SupplierProduct[]>{
-  if(productCache&&Date.now()-productCache.at<15000)return productCache.items;
-  const items=list(await request("/products")).map((p:any)=>({
+  if(productCache&&Date.now()-productCache.at<60000)return productCache.items;
+  if(productsInFlight)return productsInFlight;
+  productsInFlight=(async()=>{
+  try{const items=list(await request("/products")).map((p:any)=>({
     id:String(p.id??p.productId??p.product_id??""),
     name:String(p.name??p.title??p.productName??"Unnamed product"),
     price:Number(p.price??p.unitPrice??0),
@@ -27,6 +30,10 @@ export async function eliteProducts():Promise<SupplierProduct[]>{
     description:String(p.description??""),
     emojiId:String(p.premiumEmojiId??p.premium_emoji_id??p.emojiId??p.icon_custom_emoji_id??"")
   })).filter(p=>p.id);productCache={at:Date.now(),items};return items;
+  }catch(error){if(productCache)return productCache.items;throw error}
+  finally{productsInFlight=null}
+  })();
+  return productsInFlight;
 }
 
 export async function eliteProduct(id:string){return (await eliteProducts()).find(p=>p.id===id)||null}
