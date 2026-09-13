@@ -1827,6 +1827,57 @@ bot.on(message("text"), async (ctx) => {
       }
       return;
     }
+    if (s.method === "binance") {
+      const c = await pool.connect();
+      try {
+        await c.query("BEGIN");
+        const deposit = (
+          await c.query(
+            "SELECT id FROM deposits WHERE id=$1 AND status='checking' FOR UPDATE",
+            [depositId],
+          )
+        ).rows[0];
+        if (!deposit) throw new Error("Deposit was already processed.");
+        await c.query(
+          "UPDATE deposits SET status='approved',received_amount=$1,credited_amount=$1,verification_note='Binance API verified and auto-approved',reviewed_at=NOW() WHERE id=$2",
+          [received, depositId],
+        );
+        await c.query("UPDATE users SET balance=balance+$1 WHERE id=$2", [
+          received,
+          uid,
+        ]);
+        await c.query(
+          "INSERT INTO balance_ledger(user_id,amount,reason) VALUES($1,$2,$3)",
+          [uid, received, `BINANCE auto-approved deposit #${depositId}`],
+        );
+        await c.query("COMMIT");
+      } catch (e) {
+        await c.query("ROLLBACK");
+        throw e;
+      } finally {
+        c.release();
+      }
+      const u = await getUser(uid);
+      await ctx.reply(
+        box(
+          "✅ BINANCE PAYMENT AUTO-APPROVED",
+          `Deposit ID: #${depositId}\nRequested: $${requested.toFixed(2)}\nVerified/Credited: $${received.toFixed(2)}\nNew balance: $${Number(u?.balance || 0).toFixed(2)}\n\nBinance API verified this payment automatically.`,
+        ),
+        Markup.inlineKeyboard([[cb("💰 Open Wallet", "wallet")]]),
+      );
+      for (const adminId of await adminIds()) {
+        try {
+          await bot.telegram.sendMessage(
+            adminId,
+            box(
+              "✅ BINANCE DEPOSIT AUTO-APPROVED",
+              `ID: #${depositId}\nUser: ${uid}\nRequested: $${requested.toFixed(2)}\nVerified/Credited: $${received.toFixed(2)}\nTXID: ${text}`,
+            ),
+          );
+        } catch {}
+      }
+      return;
+    }
     await pool.query(
       "UPDATE deposits SET status='pending',received_amount=$1,verification_note='Payment verified; awaiting admin review' WHERE id=$2",
       [received, depositId],
