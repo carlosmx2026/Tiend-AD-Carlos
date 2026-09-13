@@ -76,4 +76,12 @@ async function verifyBinance(reference:string,get:Gettings):Promise<Verification
   }catch(e){errors.push(e instanceof Error?e.message:"merchant API failed");const reason=errors.find(x=>x.includes("-2015"))?"Binance rejected this API key or its IP/permissions (-2015).":errors.find(x=>x.includes("-1021"))?"Binance rejected the request timestamp (-1021).":"Binance API request failed.";console.error("Binance verification failed",errors.join(" | "));return{state:"api_error",message:`${reason} ${errors.at(-1)||""}`.slice(0,300)}}
 }
 
-export async function verifyPayment(method:PaymentMethod,txid:string,get:Gettings){if(method==="bep20")return verifyBep20(txid,get);if(method==="trc20")return verifyTrc20(txid,get);return verifyBinance(txid,get)}
+export async function verifyPayment(method:PaymentMethod,txid:string,get:Gettings){
+  if(method==="bep20")return verifyBep20(txid,get);
+  if(method==="trc20")return verifyTrc20(txid,get);
+  const result=await verifyBinance(txid,get);
+  // Every Binance auto-check failure must enter the existing locked admin
+  // approval/rejection flow instead of deleting the submitted transaction.
+  if(result.state!=="confirmed")return{state:"api_error" as const,message:`${result.state}: ${result.message}`};
+  return result;
+}
