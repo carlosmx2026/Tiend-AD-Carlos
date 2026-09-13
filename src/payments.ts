@@ -61,7 +61,9 @@ async function verifyBinance(reference:string,get:Gettings):Promise<Verification
     const params=new URLSearchParams({timestamp:String(now),startTime:String(now-hour),endTime:String(now),limit:"100",recvWindow:"60000"});
     params.set("signature",createHmac("sha256",secret).update(params.toString()).digest("hex"));
     const history=await json(`https://${host}/sapi/v1/pay/transactions?${params}`,{headers:{"X-MBX-APIKEY":key}});
-    const trade=(history?.data||[]).find((x:any)=>String(x.transactionId).toLowerCase()===reference.toLowerCase());
+    const normalizeReference=(value:unknown)=>String(value??"").trim().toUpperCase().replace(/^M_P_/,"");
+    const wanted=normalizeReference(reference);
+    const trade=(history?.data||[]).find((x:any)=>normalizeReference(x.transactionId)===wanted);
     if(trade){const usdt=String(trade.currency).toUpperCase()==="USDT"?Number(trade.amount):(trade.fundsDetail||[]).filter((x:any)=>String(x.currency).toUpperCase()==="USDT").reduce((n:number,x:any)=>n+Number(x.amount||0),0),received=Math.abs(usdt),ageMs=Date.now()-Number(trade.transactionTime||0);if(Number(trade.amount)<0)return{state:"wrong_receiver",message:"This transaction is an outgoing payment, not money received."};if(ageMs>hour)return{state:"too_old",message:"This Binance payment is older than 1 hour."};if(received>0)return{state:"confirmed",received,ageMs}}
     return{state:"not_found",message:"Transaction was not found in this Binance account's Pay history."};
   }catch(e){errors.push(e instanceof Error?e.message:"unknown error")}}
