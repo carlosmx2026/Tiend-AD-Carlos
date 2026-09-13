@@ -1,102 +1,2191 @@
-import {Telegraf,Markup} from "telegraf";import {message} from "telegraf/filters";import {randomBytes} from "node:crypto";
-import {config} from "./config.js";import {cb,urlBtn,box,cleanPremiumIds} from "./premium.js";import {initDb,ensureUser,getUser,getProducts,getProductsWithStock,getProduct,stockCount,pool} from "./db/index.js";import {getState,setState,clearState} from "./state.js";import {verifyPayment,type PaymentMethod} from "./payments.js";import {eliteConfigured,eliteOrder,eliteProduct,eliteProducts} from "./supplier.js";
-const bot=new Telegraf(config.token);const hasAdminAccess=async(ctx:any)=>Number(ctx.from?.id)===config.adminId||Boolean((await pool.query("SELECT 1 FROM admins WHERE id=$1",[ctx.from?.id])).rowCount);const id8=()=>randomBytes(4).toString("hex").toUpperCase();
-async function render(ctx:any,text:string,keyboard?:any){const safe=cleanPremiumIds(text);if(ctx.callbackQuery){try{await ctx.editMessageText(safe,keyboard);return}catch(error:any){if(String(error?.description||error?.message||"").includes("message is not modified"))return}}await ctx.reply(safe,keyboard);}
-async function getSetting(key:string){return (await pool.query("SELECT value FROM settings WHERE key=$1",[key])).rows[0]?.value||"";}
-async function setSetting(key:string,value:string){await pool.query("INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[key,value]);}
-async function adminIds(){const r=await pool.query("SELECT id FROM admins");return [...new Set([config.adminId,...r.rows.map((x:any)=>Number(x.id))])];}
-const settingLabels:Record<string,string>={support_username:"Support Username",binance_uid:"Binance UID",binance_name:"Binance Name",binance_wallet:"Binance Wallet",bsc_wallet:"BSC Wallet (BEP20)",tron_wallet:"TRON Wallet (TRC20)",bscscan_api_key:"BSCScan API Key",trongrid_api_key:"TRON API Key",binance_api_key:"Binance API Key",binance_secret_key:"Binance Secret Key",binance_merchant_id:"Merchant ID",referral_bonus:"Referral Bonus",registration_bonus:"Registration Bonus",maintenance_message:"Maintenance Message"};
-const sensitiveSettings=new Set(["binance_api_key","binance_secret_key","bscscan_api_key","trongrid_api_key"]);
-function shown(value:string,sensitive=false){if(!value)return"❌ Not Set";if(!sensitive)return value;return `✅ ${value.slice(0,3)}••••${value.slice(-3)}`;}
-async function settingButton(ctx:any,key:string,back:"admin_payment"|"admin_settings"){if(Number(ctx.from.id)!==config.adminId)return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"setting_value",key,back});await render(ctx,box(`✏️ ${settingLabels[key]||key}`,`Send the new value.\n${sensitiveSettings.has(key)?"🔐 It will stay masked on the settings screen.":"Type OFF to clear this setting."}`),Markup.inlineKeyboard([[cb("🔙 Cancel",back)]]));}
-async function home(ctx:any){const u=await getUser(ctx.from.id);await render(ctx,box("✨ STORE DN CAR",`Welcome, ${ctx.from.first_name||"Customer"}\n\n👤 User ID: ${ctx.from.id}\n💰 Balance: $${Number(u?.balance||0).toFixed(2)}\n\n⚡ Fast • Secure • Premium Delivery`),Markup.inlineKeyboard([[cb("🛍 Shop","shop")],[cb("💰 Wallet","wallet"),cb("📦 My Orders","my_orders")],[cb("👤 Profile","profile"),cb("🎧 Support","support")],[urlBtn("📢 Channel",config.channelUrl),cb("❓ Help","help")]]));}
-async function liveStock(p:any){const local=await stockCount(p.id);if(p?.supplier_type==="elite"&&p.supplier_product_id){try{return local+((await eliteProduct(String(p.supplier_product_id)))?.stock||0)}catch{return local}}return local}
-async function shop(ctx:any,page=1,filter:"all"|"available"|"out"="all"){const [all,remote]=await Promise.all([getProductsWithStock(),eliteProducts().catch(()=>[])]),remoteStock=new Map(remote.map((p:any)=>[String(p.id),Number(p.stock)||0])),withStock=all.filter((p:any)=>p.active).map((p:any)=>({...p,live_stock:Number(p.local_stock||0)+(p.supplier_type==="elite"?remoteStock.get(String(p.supplier_product_id))||0:0)})),ps=withStock.filter(p=>filter==="available"?p.live_stock>0:filter==="out"?p.live_stock<=0:true),pages=Math.max(1,Math.ceil(ps.length/15)),current=Math.min(Math.max(1,page),pages),shown=ps.slice((current-1)*15,current*15),rows:any[]=[];for(const p of shown){const icon=p.supplier_emoji_id&&/^\d{10,}$/.test(p.supplier_emoji_id)?`{${p.supplier_emoji_id}} `:"";rows.push([cb(`${icon}${p.live_stock>0?"🟢":"🔴"} ${p.name} — $${Number(p.price).toFixed(2)}`,`product:${p.id}`)])}const nav:any[]=[];if(current>1)nav.push(cb("⬅️ Previous",`shop_page:${current-1}:${filter}`));if(current<pages)nav.push(cb("➡️ Next",`shop_page:${current+1}:${filter}`));if(nav.length)rows.push(nav);rows.push([cb("📋 All","shop_page:1:all"),cb("🟢 Available","shop_page:1:available"),cb("❌ Out of Stock","shop_page:1:out")],[cb("🔙 Main Menu","home")]);await render(ctx,box("🛍 SHOP",`${ps.length?"Choose a product:":"No products found."}\n\nPage ${current} of ${pages} • ${ps.length} products`),Markup.inlineKeyboard(rows));}
-async function product(ctx:any,id:string){const p=await getProduct(id);if(!p)return;const n=await liveStock(p);const status=n>0?"🟢 IN STOCK":p.preorder_enabled?"🔵 PRE-ORDER AVAILABLE":"🔴 OUT OF STOCK";const rows:any[]=[];if(n>0||p.preorder_enabled)rows.push([cb("🛒 Buy Now",`buy:${id}`)]);rows.push([cb("🔙 Back","shop")]);await render(ctx,box(`📦 ${p.name}`,`${p.description||"Premium digital product"}\n\n💰 Price: $${Number(p.price).toFixed(2)}\n📦 Stock: ${n}\n🛡 Warranty: ${p.warranty||"N/A"}\n\n${status}${p.note?`\n\n📌 ${p.note}`:""}`),Markup.inlineKeyboard(rows));}
-function adminKeyboard(){return Markup.inlineKeyboard([[cb("📦 Tool Management","admin_tools")],[cb("🔢 Product Location","admin_product_location")],[cb("📊 Stock Manage","admin_stock")],[cb("📢 Broadcast","admin_broadcast"),cb("❓ Help Manage","admin_help")],[cb("💳 Payment Settings","admin_payment"),cb("⚙️ Store Settings","admin_settings")],[cb("👑 Admins","admin_manage"),cb("🎟 Coupons","admin_coupons")],[cb("➕ Add Balance","admin_balance_add"),cb("➖ Remove Balance","admin_balance_remove")],[cb("💰 Check Balance","admin_balance_check")],[cb("🔎 Track Order ID","admin_track")],[cb("📊 Dashboard","admin_dashboard")]]);}
-async function admin(ctx:any){await render(ctx,box("👑 ADMIN HQ","Welcome boss 😎\nChoose your next move:"),adminKeyboard());}
-async function tools(ctx:any){const ps=await getProducts();const rows:any[]=[[cb("➕ Add Tool","admin_add_tool")],[cb("➕ ADD ALL ELITE PRODUCTS","supplier_import_all")],[cb(`🔌 Elite Supplier: ${eliteConfigured()?"✅ CONNECTED":"❌ NOT SET"}`,"supplier_status")]];for(const p of ps)rows.push([cb(`📦 ${p.name}`,`admin_tool:${p.id}`)]);rows.push([cb("🔙 Back","admin_home")]);await render(ctx,box("📦 TOOL MANAGEMENT","Add every Elite product at once, or select a tool to link it manually:"),Markup.inlineKeyboard(rows));}
-async function tool(ctx:any,id:string){const p=await getProduct(id);if(!p)return;const local=await stockCount(id),remote=p.supplier_type==="elite"&&p.supplier_product_id?await eliteProduct(String(p.supplier_product_id)).catch(()=>null):null,total=local+(remote?.stock||0);const rows:any[]=[[cb("✏️ Change Price",`field:price:${id}`),cb("🛡 Change Warranty",`field:warranty:${id}`)],[cb("📝 Change Description",`field:description:${id}`)],[cb("📌 Edit Note",`field:note:${id}`),cb("📌 Remove Note",`clear:note:${id}`)],[cb("📬 Delivery Note",`field:delivery_note:${id}`),cb("📬 Remove Dlv Note",`clear:delivery_note:${id}`)],[cb("📋 Set Delivery Template",`field:delivery_template:${id}`)],[cb("📦 Toggle Stock Status",`toggle:stock_enabled:${id}`)],[cb(`${p.client_mail_activation?"🔴 Disable":"🟢 Enable"} Client-Mail Activation`,`toggle:client_mail_activation:${id}`)],[cb(`${p.preorder_enabled?"🔴 Disable":"🟢 Enable"} Pre-Order`,`toggle:preorder_enabled:${id}`)],[cb(remote?"🔄 Change Supplier Product":"🔌 Link Supplier API",`supplier:${id}`)]];if(remote)rows.push([cb("❌ Unlink Elite Supplier",`supplier_unlink:${id}`)]);rows.push([cb("➕ Add Sub Tool",`subtool_add:${id}`),cb("🧰 Manage Sub Tools",`subtool_manage:${id}`)],[cb("✏️ Rename Tool",`field:name:${id}`)],[cb("🗑 Remove Tool",`remove_tool:${id}`)],[cb("🔙 Back","admin_tools")]);await render(ctx,box("📦 TOOL CONTROL",`📦 ${p.name}\n💰 $${Number(p.price).toFixed(2)}\n🛡 ${p.warranty||"N/A"}\n📦 Local Stock: ${local}\n🔌 Elite Stock: ${remote?.stock||0}\n📊 Total Stock: ${total}${remote?`\n🔗 Linked: ${remote.name}`:""}`),Markup.inlineKeyboard(rows));}
-async function picker(ctx:any,prefix:string,title:string){const ps=await getProducts();const rows=ps.map((p:any)=>[cb(`📦 ${p.name}`,`${prefix}:${p.id}`)]);rows.push([cb("🔙 Back","admin_home")]);await render(ctx,box(title,"Select a tool:"),Markup.inlineKeyboard(rows));}
+import { Telegraf, Markup } from "telegraf";
+import { message } from "telegraf/filters";
+import { randomBytes } from "node:crypto";
+import { config } from "./config.js";
+import { cb, urlBtn, box, cleanPremiumIds } from "./premium.js";
+import {
+  initDb,
+  ensureUser,
+  getUser,
+  getProducts,
+  getProductsWithStock,
+  getProduct,
+  stockCount,
+  pool,
+} from "./db/index.js";
+import { getState, setState, clearState } from "./state.js";
+import { verifyPayment, type PaymentMethod } from "./payments.js";
+import {
+  eliteConfigured,
+  eliteOrder,
+  eliteProduct,
+  eliteProducts,
+} from "./supplier.js";
+const bot = new Telegraf(config.token);
+const hasAdminAccess = async (ctx: any) =>
+  Number(ctx.from?.id) === config.adminId ||
+  Boolean(
+    (await pool.query("SELECT 1 FROM admins WHERE id=$1", [ctx.from?.id]))
+      .rowCount,
+  );
+const id8 = () => randomBytes(4).toString("hex").toUpperCase();
+async function render(ctx: any, text: string, keyboard?: any) {
+  const safe = cleanPremiumIds(text);
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(safe, keyboard);
+      return;
+    } catch (error: any) {
+      if (
+        String(error?.description || error?.message || "").includes(
+          "message is not modified",
+        )
+      )
+        return;
+    }
+  }
+  await ctx.reply(safe, keyboard);
+}
+async function getSetting(key: string) {
+  return (
+    (await pool.query("SELECT value FROM settings WHERE key=$1", [key])).rows[0]
+      ?.value || ""
+  );
+}
+async function setSetting(key: string, value: string) {
+  await pool.query(
+    "INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
+    [key, value],
+  );
+}
+async function adminIds() {
+  const r = await pool.query("SELECT id FROM admins");
+  return [
+    ...new Set([config.adminId, ...r.rows.map((x: any) => Number(x.id))]),
+  ];
+}
+const settingLabels: Record<string, string> = {
+  support_username: "Support Username",
+  binance_uid: "Binance UID",
+  binance_name: "Binance Name",
+  binance_wallet: "Binance Wallet",
+  bsc_wallet: "BSC Wallet (BEP20)",
+  tron_wallet: "TRON Wallet (TRC20)",
+  bscscan_api_key: "BSCScan API Key",
+  trongrid_api_key: "TRON API Key",
+  binance_api_key: "Binance API Key",
+  binance_secret_key: "Binance Secret Key",
+  binance_merchant_id: "Merchant ID",
+  referral_bonus: "Referral Bonus",
+  registration_bonus: "Registration Bonus",
+  maintenance_message: "Maintenance Message",
+};
+const sensitiveSettings = new Set([
+  "binance_api_key",
+  "binance_secret_key",
+  "bscscan_api_key",
+  "trongrid_api_key",
+]);
+function shown(value: string, sensitive = false) {
+  if (!value) return "❌ Not Set";
+  if (!sensitive) return value;
+  return `✅ ${value.slice(0, 3)}••••${value.slice(-3)}`;
+}
+async function settingButton(
+  ctx: any,
+  key: string,
+  back: "admin_payment" | "admin_settings",
+) {
+  if (Number(ctx.from.id) !== config.adminId) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "setting_value", key, back });
+  await render(
+    ctx,
+    box(
+      `✏️ ${settingLabels[key] || key}`,
+      `Send the new value.\n${sensitiveSettings.has(key) ? "🔐 It will stay masked on the settings screen." : "Type OFF to clear this setting."}`,
+    ),
+    Markup.inlineKeyboard([[cb("🔙 Cancel", back)]]),
+  );
+}
+async function home(ctx: any) {
+  const u = await getUser(ctx.from.id);
+  await render(
+    ctx,
+    box(
+      "✨ STORE DN CAR",
+      `Welcome, ${ctx.from.first_name || "Customer"}\n\n👤 User ID: ${ctx.from.id}\n💰 Balance: $${Number(u?.balance || 0).toFixed(2)}\n\n⚡ Fast • Secure • Premium Delivery`,
+    ),
+    Markup.inlineKeyboard([
+      [cb("🛍 Shop", "shop")],
+      [cb("💰 Wallet", "wallet"), cb("📦 My Orders", "my_orders")],
+      [cb("👤 Profile", "profile"), cb("🎧 Support", "support")],
+      [urlBtn("📢 Channel", config.channelUrl), cb("❓ Help", "help")],
+    ]),
+  );
+}
+async function liveStock(p: any) {
+  const local = await stockCount(p.id);
+  if (p?.supplier_type === "elite" && p.supplier_product_id) {
+    try {
+      return (
+        local +
+        ((await eliteProduct(String(p.supplier_product_id)))?.stock || 0)
+      );
+    } catch {
+      return local;
+    }
+  }
+  return local;
+}
+async function shop(
+  ctx: any,
+  page = 1,
+  filter: "all" | "available" | "out" = "all",
+) {
+  const [all, remote] = await Promise.all([
+      getProductsWithStock(),
+      eliteProducts().catch(() => []),
+    ]),
+    remoteStock = new Map(
+      remote.map((p: any) => [String(p.id), Number(p.stock) || 0]),
+    ),
+    withStock = all
+      .filter((p: any) => p.active)
+      .map((p: any) => ({
+        ...p,
+        live_stock:
+          Number(p.local_stock || 0) +
+          (p.supplier_type === "elite"
+            ? remoteStock.get(String(p.supplier_product_id)) || 0
+            : 0),
+      })),
+    ps = withStock.filter((p) =>
+      filter === "available"
+        ? p.live_stock > 0
+        : filter === "out"
+          ? p.live_stock <= 0
+          : true,
+    ),
+    pages = Math.max(1, Math.ceil(ps.length / 15)),
+    current = Math.min(Math.max(1, page), pages),
+    shown = ps.slice((current - 1) * 15, current * 15),
+    rows: any[] = [];
+  for (const p of shown) {
+    const icon =
+      p.supplier_emoji_id && /^\d{10,}$/.test(p.supplier_emoji_id)
+        ? `{${p.supplier_emoji_id}} `
+        : "";
+    rows.push([
+      cb(
+        `${icon}${p.live_stock > 0 ? "🟢" : "🔴"} ${p.name} — $${Number(p.price).toFixed(2)}`,
+        `product:${p.id}`,
+      ),
+    ]);
+  }
+  const nav: any[] = [];
+  if (current > 1)
+    nav.push(cb("⬅️ Previous", `shop_page:${current - 1}:${filter}`));
+  if (current < pages)
+    nav.push(cb("➡️ Next", `shop_page:${current + 1}:${filter}`));
+  if (nav.length) rows.push(nav);
+  rows.push(
+    [
+      cb("📋 All", "shop_page:1:all"),
+      cb("🟢 Available", "shop_page:1:available"),
+      cb("❌ Out of Stock", "shop_page:1:out"),
+    ],
+    [cb("🔙 Main Menu", "home")],
+  );
+  await render(
+    ctx,
+    box(
+      "🛍 SHOP",
+      `${ps.length ? "Choose a product:" : "No products found."}\n\nPage ${current} of ${pages} • ${ps.length} products`,
+    ),
+    Markup.inlineKeyboard(rows),
+  );
+}
+async function product(ctx: any, id: string) {
+  const p = await getProduct(id);
+  if (!p) return;
+  const n = await liveStock(p);
+  const status =
+    n > 0
+      ? "🟢 IN STOCK"
+      : p.preorder_enabled
+        ? "🔵 PRE-ORDER AVAILABLE"
+        : "🔴 OUT OF STOCK";
+  const rows: any[] = [];
+  if (n > 0 || p.preorder_enabled) rows.push([cb("🛒 Buy Now", `buy:${id}`)]);
+  rows.push([cb("🔙 Back", "shop")]);
+  await render(
+    ctx,
+    box(
+      `📦 ${p.name}`,
+      `${p.description || "Premium digital product"}\n\n💰 Price: $${Number(p.price).toFixed(2)}\n📦 Stock: ${n}\n🛡 Warranty: ${p.warranty || "N/A"}\n\n${status}${p.note ? `\n\n📌 ${p.note}` : ""}`,
+    ),
+    Markup.inlineKeyboard(rows),
+  );
+}
+function adminKeyboard() {
+  return Markup.inlineKeyboard([
+    [cb("📦 Tool Management", "admin_tools")],
+    [cb("🔢 Product Location", "admin_product_location")],
+    [cb("📊 Stock Manage", "admin_stock")],
+    [cb("📢 Broadcast", "admin_broadcast"), cb("❓ Help Manage", "admin_help")],
+    [
+      cb("💳 Payment Settings", "admin_payment"),
+      cb("⚙️ Store Settings", "admin_settings"),
+    ],
+    [cb("👑 Admins", "admin_manage"), cb("🎟 Coupons", "admin_coupons")],
+    [
+      cb("➕ Add Balance", "admin_balance_add"),
+      cb("➖ Remove Balance", "admin_balance_remove"),
+    ],
+    [cb("💰 Check Balance", "admin_balance_check")],
+    [cb("🔎 Track Order ID", "admin_track")],
+    [cb("📊 Dashboard", "admin_dashboard")],
+  ]);
+}
+async function admin(ctx: any) {
+  await render(
+    ctx,
+    box("👑 ADMIN HQ", "Welcome boss 😎\nChoose your next move:"),
+    adminKeyboard(),
+  );
+}
+async function tools(ctx: any) {
+  const ps = await getProducts();
+  const rows: any[] = [
+    [cb("➕ Add Tool", "admin_add_tool")],
+    [cb("➕ ADD ALL ELITE PRODUCTS", "supplier_import_all")],
+    [
+      cb(
+        `🔌 Elite Supplier: ${eliteConfigured() ? "✅ CONNECTED" : "❌ NOT SET"}`,
+        "supplier_status",
+      ),
+    ],
+  ];
+  for (const p of ps) rows.push([cb(`📦 ${p.name}`, `admin_tool:${p.id}`)]);
+  rows.push([cb("🔙 Back", "admin_home")]);
+  await render(
+    ctx,
+    box(
+      "📦 TOOL MANAGEMENT",
+      "Add every Elite product at once, or select a tool to link it manually:",
+    ),
+    Markup.inlineKeyboard(rows),
+  );
+}
+async function tool(ctx: any, id: string) {
+  const p = await getProduct(id);
+  if (!p) return;
+  const local = await stockCount(id),
+    remote =
+      p.supplier_type === "elite" && p.supplier_product_id
+        ? await eliteProduct(String(p.supplier_product_id)).catch(() => null)
+        : null,
+    total = local + (remote?.stock || 0);
+  const rows: any[] = [
+    [
+      cb("✏️ Change Price", `field:price:${id}`),
+      cb("🛡 Change Warranty", `field:warranty:${id}`),
+    ],
+    [cb("📝 Change Description", `field:description:${id}`)],
+    [
+      cb("📌 Edit Note", `field:note:${id}`),
+      cb("📌 Remove Note", `clear:note:${id}`),
+    ],
+    [
+      cb("📬 Delivery Note", `field:delivery_note:${id}`),
+      cb("📬 Remove Dlv Note", `clear:delivery_note:${id}`),
+    ],
+    [cb("📋 Set Delivery Template", `field:delivery_template:${id}`)],
+    [cb("📦 Toggle Stock Status", `toggle:stock_enabled:${id}`)],
+    [
+      cb(
+        `${p.client_mail_activation ? "🔴 Disable" : "🟢 Enable"} Client-Mail Activation`,
+        `toggle:client_mail_activation:${id}`,
+      ),
+    ],
+    [
+      cb(
+        `${p.preorder_enabled ? "🔴 Disable" : "🟢 Enable"} Pre-Order`,
+        `toggle:preorder_enabled:${id}`,
+      ),
+    ],
+    [
+      cb(
+        remote ? "🔄 Change Supplier Product" : "🔌 Link Supplier API",
+        `supplier:${id}`,
+      ),
+    ],
+  ];
+  if (remote)
+    rows.push([cb("❌ Unlink Elite Supplier", `supplier_unlink:${id}`)]);
+  rows.push(
+    [
+      cb("➕ Add Sub Tool", `subtool_add:${id}`),
+      cb("🧰 Manage Sub Tools", `subtool_manage:${id}`),
+    ],
+    [cb("✏️ Rename Tool", `field:name:${id}`)],
+    [cb("🗑 Remove Tool", `remove_tool:${id}`)],
+    [cb("🔙 Back", "admin_tools")],
+  );
+  await render(
+    ctx,
+    box(
+      "📦 TOOL CONTROL",
+      `📦 ${p.name}\n💰 $${Number(p.price).toFixed(2)}\n🛡 ${p.warranty || "N/A"}\n📦 Local Stock: ${local}\n🔌 Elite Stock: ${remote?.stock || 0}\n📊 Total Stock: ${total}${remote ? `\n🔗 Linked: ${remote.name}` : ""}`,
+    ),
+    Markup.inlineKeyboard(rows),
+  );
+}
+async function picker(ctx: any, prefix: string, title: string) {
+  const ps = await getProducts();
+  const rows = ps.map((p: any) => [cb(`📦 ${p.name}`, `${prefix}:${p.id}`)]);
+  rows.push([cb("🔙 Back", "admin_home")]);
+  await render(ctx, box(title, "Select a tool:"), Markup.inlineKeyboard(rows));
+}
 
-bot.use(async(ctx,next)=>{if(await hasAdminAccess(ctx))return next();if((await getSetting("maintenance_enabled"))==="true"){const msg=(await getSetting("maintenance_message"))||"🔧 STORE DN CAR is under maintenance. We will be back shortly.";if(ctx.callbackQuery)await ctx.answerCbQuery(msg,{show_alert:true});else await ctx.reply(box("🔧 MAINTENANCE",msg));return}return next()});
-bot.start(async ctx=>{const existed=await getUser(ctx.from.id);await ensureUser(ctx.from.id,ctx.from.username,ctx.from.first_name);if(!existed){const reg=Number(await getSetting("registration_bonus")||0);if(reg>0){await pool.query("UPDATE users SET balance=balance+$1 WHERE id=$2",[reg,ctx.from.id]);await pool.query("INSERT INTO balance_ledger(user_id,amount,reason) VALUES($1,$2,'Registration bonus')",[ctx.from.id,reg])}const referrer=Number((ctx as any).startPayload||0),refBonus=Number(await getSetting("referral_bonus")||0);if(referrer&&referrer!==ctx.from.id&&refBonus>0&&await getUser(referrer)){const added=await pool.query("INSERT INTO referrals(referred_user_id,referrer_user_id,bonus) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING referred_user_id",[ctx.from.id,referrer,refBonus]);if(added.rowCount){await pool.query("UPDATE users SET balance=balance+$1 WHERE id=$2",[refBonus,referrer]);await pool.query("INSERT INTO balance_ledger(user_id,amount,reason) VALUES($1,$2,$3)",[referrer,refBonus,`Referral bonus for ${ctx.from.id}`]);try{await bot.telegram.sendMessage(referrer,box("🎁 REFERRAL BONUS",`$${refBonus.toFixed(2)} was added to your wallet.`))}catch{}}}}await home(ctx)});bot.command("admin",async ctx=>{if(await hasAdminAccess(ctx))await admin(ctx)});
-bot.action("home",async ctx=>{await ctx.answerCbQuery();await home(ctx)});bot.action("shop",async ctx=>{await ctx.answerCbQuery();await shop(ctx)});bot.action(/^shop_page:(\d+):(all|available|out)$/,async ctx=>{await ctx.answerCbQuery();await shop(ctx,Number(ctx.match[1]),ctx.match[2] as any)});bot.action(/^product:(.+)$/,async ctx=>{await ctx.answerCbQuery();await product(ctx,ctx.match[1])});
-bot.action("wallet",async ctx=>{await ctx.answerCbQuery();const u=await getUser(ctx.from.id);const s=(await pool.query("SELECT COALESCE(SUM(total),0) t FROM orders WHERE user_id=$1",[ctx.from.id])).rows[0];const d=(await pool.query("SELECT COUNT(*)::int n FROM deposits WHERE user_id=$1 AND status='pending'",[ctx.from.id])).rows[0];await render(ctx,box("💰 MY WALLET",`💵 Balance: $${Number(u?.balance||0).toFixed(2)}\n📦 Total Spent: $${Number(s?.t||0).toFixed(2)}\n⏳ Pending Deposits: ${d.n}\n\nReady to top up? 🚀`),Markup.inlineKeyboard([[cb("➕ Deposit Funds","deposit")],[cb("🔙 Back","home")]]))});
-bot.action("profile",async ctx=>{await ctx.answerCbQuery();const u=await getUser(ctx.from.id);const o=(await pool.query("SELECT COUNT(*)::int n FROM orders WHERE user_id=$1",[ctx.from.id])).rows[0];await render(ctx,box("👤 PROFILE",`🆔 User ID: ${ctx.from.id}\n👤 Username: @${ctx.from.username||"N/A"}\n💰 Balance: $${Number(u?.balance||0).toFixed(2)}\n📦 Orders: ${o.n}`),Markup.inlineKeyboard([[cb("🔙 Back","home")]]))});
-bot.action("my_orders",async ctx=>{await ctx.answerCbQuery();const r=await pool.query("SELECT * FROM orders WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10",[ctx.from.id]);await render(ctx,box("📦 MY ORDERS",r.rows.length?r.rows.map((o:any)=>`✅ #${o.id} • ${o.product_name} x${o.quantity} • $${Number(o.total).toFixed(2)}`).join("\n"):"No orders yet."),Markup.inlineKeyboard([[cb("🔙 Back","home")]]))});
-bot.action("support",async ctx=>{await ctx.answerCbQuery();const support=(await getSetting("support_username"))||config.supportUsername;await render(ctx,box("🎧 SUPPORT",`Contact support: ${support}`),Markup.inlineKeyboard([[cb("🔙 Back","home")]]))});
-bot.action("help",async ctx=>{await ctx.answerCbQuery();const r=await pool.query("SELECT * FROM help_items WHERE active=TRUE ORDER BY title");await render(ctx,box("❓ HELP",r.rows.length?r.rows.map((x:any)=>`❓ ${x.title}\n${x.content}`).join("\n\n"):"No help articles yet."),Markup.inlineKeyboard([[cb("🔙 Back","home")]]))});
-bot.action(/^buy:(.+)$/,async ctx=>{await ctx.answerCbQuery();setState(ctx.from.id,{step:"buy_qty",productId:ctx.match[1]});await render(ctx,"Send quantity:")});
-async function completeSupplierOrder(ctx:any,p:any,q:number){const uid=ctx.from.id,total=Number(p.price)*q,u=await getUser(uid);if(Number(u?.balance||0)<total)return void render(ctx,"❌ Insufficient wallet balance. Deposit funds first.");const localRows=(await pool.query("SELECT * FROM stock_items WHERE product_id=$1 AND sold=FALSE ORDER BY id LIMIT $2",[p.id,q])).rows,apiQty=Math.max(0,q-localRows.length),remote=apiQty?await eliteProduct(String(p.supplier_product_id)):null;if(apiQty&&(!remote||remote.stock<apiQty))return void render(ctx,"❌ Insufficient combined stock.");try{const supplied=apiQty?await eliteOrder(String(p.supplier_product_id),apiQty):{items:[],supplierOrderId:""},c=await pool.connect();try{await c.query("BEGIN");const locked=(await c.query("SELECT balance FROM users WHERE id=$1 FOR UPDATE",[uid])).rows[0];if(Number(locked?.balance||0)<total)throw new Error("Insufficient wallet balance.");const freshLocal=await c.query("SELECT * FROM stock_items WHERE product_id=$1 AND sold=FALSE ORDER BY id FOR UPDATE LIMIT $2",[p.id,localRows.length]);if(freshLocal.rows.length!==localRows.length)throw new Error("Local stock changed during checkout. Please retry.");const oid=id8(),items=[...freshLocal.rows.map((x:any)=>String(x.value)),...supplied.items];await c.query("UPDATE users SET balance=balance-$1 WHERE id=$2",[total,uid]);for(const x of freshLocal.rows)await c.query("UPDATE stock_items SET sold=TRUE,sold_order_id=$1 WHERE id=$2",[oid,x.id]);await c.query("INSERT INTO orders(id,user_id,product_id,product_name,quantity,unit_price,total,delivery) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[oid,uid,p.id,p.name,q,p.price,total,items.join("\n")]);await c.query("COMMIT");clearState(uid);const note=p.delivery_note?`\n\n📌 ${p.delivery_note}`:"";await render(ctx,box("✅ ORDER COMPLETED",`📦 Product: ${p.name}\n🔢 Qty: ${q}\n🆔 Order ID: #${oid}\n💰 Paid: $${total.toFixed(2)}\n\n━━━━━━━━ DELIVERY ━━━━━━━━\n\n${items.map((v:string,i:number)=>`${i+1}.\n${v}`).join("\n\n")}${note}\n\nThank you for shopping with STORE DN CAR.`))}catch(e){await c.query("ROLLBACK");throw e}finally{c.release()}}catch(e:any){await render(ctx,box("❌ SUPPLIER ORDER FAILED",`${e.message}\n\nYour wallet was not charged.`))}}
-async function completeWalletOrder(ctx:any,productId:string,q:number){const uid=ctx.from.id,c=await pool.connect();try{await c.query("BEGIN");const p=(await c.query("SELECT * FROM products WHERE id=$1 FOR UPDATE",[productId])).rows[0];if(!p)throw new Error("Product not found.");const stock=await c.query("SELECT * FROM stock_items WHERE product_id=$1 AND sold=FALSE ORDER BY id FOR UPDATE LIMIT $2",[p.id,q]);if(stock.rows.length<q)throw new Error("Insufficient stock.");const u=(await c.query("SELECT * FROM users WHERE id=$1 FOR UPDATE",[uid])).rows[0],total=Number(p.price)*q;if(Number(u?.balance||0)<total)throw new Error("Insufficient wallet balance. Deposit funds first.");const oid=id8(),vals=stock.rows.map((x:any)=>x.value);await c.query("UPDATE users SET balance=balance-$1 WHERE id=$2",[total,uid]);for(const x of stock.rows)await c.query("UPDATE stock_items SET sold=TRUE,sold_order_id=$1 WHERE id=$2",[oid,x.id]);await c.query("INSERT INTO orders(id,user_id,product_id,product_name,quantity,unit_price,total,delivery) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[oid,uid,p.id,p.name,q,p.price,total,vals.join("\n")]);await c.query("COMMIT");clearState(uid);await render(ctx,box("✅ ORDER COMPLETED",`📦 Product: ${p.name}\n🔢 Qty: ${q}\n🆔 Order ID: #${oid}\n💰 Paid: $${total.toFixed(2)}\n\n━━━━━━━━ DELIVERY ━━━━━━━━\n\n${vals.map((v:string,i:number)=>`${i+1}.\n${v}`).join("\n\n")}\n\nThank you for shopping with STORE DN CAR.`))}catch(e:any){await c.query("ROLLBACK");await render(ctx,`❌ ${e.message}`)}finally{c.release()}}
-bot.action("checkout_wallet",async ctx=>{await ctx.answerCbQuery();const s=getState(ctx.from.id);if(!s||s.step!=="checkout")return void render(ctx,"⌛ Checkout expired. Select the product again.");const p=await getProduct(s.productId);if(p?.supplier_type==="elite"&&p.supplier_product_id)return void await completeSupplierOrder(ctx,p,s.quantity);await completeWalletOrder(ctx,s.productId,s.quantity)});
-bot.action(/^checkout_pay:(binance|bep20|trc20)$/,async ctx=>{await ctx.answerCbQuery();const s=getState(ctx.from.id);if(!s||s.step!=="checkout")return void render(ctx,"⌛ Checkout expired. Select the product again.");const method=ctx.match[1] as PaymentMethod,key=method==="binance"?"binance_uid":method==="bep20"?"bsc_wallet":"tron_wallet",receiver=await getSetting(key);if(!receiver)return void render(ctx,"❌ This payment method is not configured.");setState(ctx.from.id,{step:"deposit_txid",method,amount:s.total});await render(ctx,box("💳 COMPLETE PRODUCT PAYMENT",`Order total: $${s.total.toFixed(2)}\nMethod: ${method.toUpperCase()}\nReceiver: ${receiver}\n\nPay now and send the transaction ID. After credit, use Wallet checkout to receive the product.`),Markup.inlineKeyboard([[cb("🔙 Cancel","shop")]]))});
-bot.action("deposit",async ctx=>{await ctx.answerCbQuery();const enabled=async(k:string)=>(await getSetting(k))!=="false";const rows:any[]=[];if(await enabled("binance_enabled"))rows.push([cb("🟡 Binance Pay","deposit_method:binance")]);if(await enabled("bep20_enabled"))rows.push([cb("💎 USDT BEP20","deposit_method:bep20")]);if(await enabled("trc20_enabled"))rows.push([cb("💎 USDT TRC20","deposit_method:trc20")]);rows.push([cb("🔙 Back to Wallet","wallet")]);await render(ctx,box("➕ DEPOSIT FUNDS","Choose your payment network:\n\n⚡ Automatic verification • Duplicate protection • Partial credit"),Markup.inlineKeyboard(rows))});
-bot.action("deposit_binance",async ctx=>{await ctx.answerCbQuery();setState(ctx.from.id,{step:"deposit_amount",method:"binance"});await render(ctx,box("🟡 BINANCE PAY","Send the amount you want to deposit in USD.\nExample: 10"),Markup.inlineKeyboard([[cb("🔙 Cancel","deposit")]]))});
-bot.action(/^deposit_method:(binance|bep20|trc20)$/,async ctx=>{await ctx.answerCbQuery();const method=ctx.match[1] as PaymentMethod,key=method==="binance"?"binance_uid":method==="bep20"?"bsc_wallet":"tron_wallet",receiver=await getSetting(key);if(!receiver){await render(ctx,box("⚠️ METHOD UNAVAILABLE","Admin has not configured this payment method yet."),Markup.inlineKeyboard([[cb("🔙 Back","deposit")]]));return}setState(ctx.from.id,{step:"deposit_amount",method});await render(ctx,box(method==="binance"?"🟡 BINANCE PAY":method==="bep20"?"💎 USDT BEP20":"💎 USDT TRC20","How much do you want to deposit?\n\nSend amount in USD, for example: 10"),Markup.inlineKeyboard([[cb("🔙 Cancel","deposit")]]))});
-bot.action(/^deposit_more:(binance|bep20|trc20):([0-9]+(?:\.[0-9]+)?)$/,async ctx=>{await ctx.answerCbQuery();const method=ctx.match[1] as PaymentMethod,amount=Number(ctx.match[2]);setState(ctx.from.id,{step:"deposit_txid",method,amount});const receiver=method==="binance"?(await getSetting("binance_uid")):method==="bep20"?(await getSetting("bsc_wallet")):(await getSetting("tron_wallet"));await render(ctx,box("💳 PAY REMAINING AMOUNT",`Remaining: $${amount.toFixed(2)}\nMethod: ${method.toUpperCase()}\nReceiver: ${receiver}\n\nPay the remaining amount, then send its NEW transaction ID.`),Markup.inlineKeyboard([[cb("🔙 Cancel","wallet")]]))});
-bot.action(/^deposit_approve:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const c=await pool.connect();try{await c.query("BEGIN");const d=(await c.query("SELECT * FROM deposits WHERE id=$1 FOR UPDATE",[ctx.match[1]])).rows[0];if(!d||d.status!=="pending"){await c.query("ROLLBACK");await render(ctx,"ℹ️ This transaction has already been processed and cannot be reused.");return}const verified=Number(d.received_amount||d.amount),already=Number(d.credited_amount||0),credit=Math.max(0,verified-already);await c.query("UPDATE deposits SET status='approved',credited_amount=credited_amount+$1,reviewed_by=$2,reviewed_at=NOW() WHERE id=$3",[credit,ctx.from.id,d.id]);if(credit>0){await c.query("UPDATE users SET balance=balance+$1 WHERE id=$2",[credit,d.user_id]);await c.query("INSERT INTO balance_ledger(user_id,amount,reason,admin_id) VALUES($1,$2,$3,$4)",[d.user_id,credit,`${String(d.method).toUpperCase()} deposit #${d.id}`,ctx.from.id])}await c.query("COMMIT");const u=await getUser(Number(d.user_id));await render(ctx,box("✅ DEPOSIT APPROVED",`ID: #${d.id}\nUser: ${d.user_id}\nMethod: ${String(d.method).toUpperCase()}\nCredited: $${credit.toFixed(2)}\n\nTransaction is now locked forever.`));await bot.telegram.sendMessage(d.user_id,box("✅ PAYMENT APPROVED",`Received: $${verified.toFixed(2)}\nAdded to wallet: $${credit.toFixed(2)}\nNew balance: $${Number(u?.balance||0).toFixed(2)}\nDeposit ID: #${d.id}`),Markup.inlineKeyboard([[cb("💰 Open Wallet","wallet")]]))}catch(e){await c.query("ROLLBACK");throw e}finally{c.release()}});
-bot.action(/^deposit_reject:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const r=await pool.query("UPDATE deposits SET status='rejected',reviewed_by=$1,reviewed_at=NOW() WHERE id=$2 AND status='pending' RETURNING *",[ctx.from.id,ctx.match[1]]);if(!r.rows[0]){await render(ctx,"ℹ️ This transaction has already been processed.");return}const d=r.rows[0];await render(ctx,box("❌ DEPOSIT REJECTED",`ID: #${d.id}\nUser: ${d.user_id}\nTXID locked — it can never be submitted again.`));await bot.telegram.sendMessage(d.user_id,box("❌ PAYMENT REJECTED",`Deposit #${d.id} was rejected.\nThis transaction ID is permanently locked and cannot be reused.\nContact support if you believe this is a mistake.`))});
+bot.use(async (ctx, next) => {
+  if (await hasAdminAccess(ctx)) return next();
+  if ((await getSetting("maintenance_enabled")) === "true") {
+    const msg =
+      (await getSetting("maintenance_message")) ||
+      "🔧 STORE DN CAR is under maintenance. We will be back shortly.";
+    if (ctx.callbackQuery) await ctx.answerCbQuery(msg, { show_alert: true });
+    else await ctx.reply(box("🔧 MAINTENANCE", msg));
+    return;
+  }
+  return next();
+});
+bot.start(async (ctx) => {
+  const existed = await getUser(ctx.from.id);
+  await ensureUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
+  if (!existed) {
+    const reg = Number((await getSetting("registration_bonus")) || 0);
+    if (reg > 0) {
+      await pool.query("UPDATE users SET balance=balance+$1 WHERE id=$2", [
+        reg,
+        ctx.from.id,
+      ]);
+      await pool.query(
+        "INSERT INTO balance_ledger(user_id,amount,reason) VALUES($1,$2,'Registration bonus')",
+        [ctx.from.id, reg],
+      );
+    }
+    const referrer = Number((ctx as any).startPayload || 0),
+      refBonus = Number((await getSetting("referral_bonus")) || 0);
+    if (
+      referrer &&
+      referrer !== ctx.from.id &&
+      refBonus > 0 &&
+      (await getUser(referrer))
+    ) {
+      const added = await pool.query(
+        "INSERT INTO referrals(referred_user_id,referrer_user_id,bonus) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING referred_user_id",
+        [ctx.from.id, referrer, refBonus],
+      );
+      if (added.rowCount) {
+        await pool.query("UPDATE users SET balance=balance+$1 WHERE id=$2", [
+          refBonus,
+          referrer,
+        ]);
+        await pool.query(
+          "INSERT INTO balance_ledger(user_id,amount,reason) VALUES($1,$2,$3)",
+          [referrer, refBonus, `Referral bonus for ${ctx.from.id}`],
+        );
+        try {
+          await bot.telegram.sendMessage(
+            referrer,
+            box(
+              "🎁 REFERRAL BONUS",
+              `$${refBonus.toFixed(2)} was added to your wallet.`,
+            ),
+          );
+        } catch {}
+      }
+    }
+  }
+  await home(ctx);
+});
+bot.command("admin", async (ctx) => {
+  if (await hasAdminAccess(ctx)) await admin(ctx);
+});
+bot.action("home", async (ctx) => {
+  await ctx.answerCbQuery();
+  await home(ctx);
+});
+bot.action("shop", async (ctx) => {
+  await ctx.answerCbQuery();
+  await shop(ctx);
+});
+bot.action(/^shop_page:(\d+):(all|available|out)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  await shop(ctx, Number(ctx.match[1]), ctx.match[2] as any);
+});
+bot.action(/^product:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  await product(ctx, ctx.match[1]);
+});
+bot.action("wallet", async (ctx) => {
+  await ctx.answerCbQuery();
+  const u = await getUser(ctx.from.id);
+  const s = (
+    await pool.query(
+      "SELECT COALESCE(SUM(total),0) t FROM orders WHERE user_id=$1",
+      [ctx.from.id],
+    )
+  ).rows[0];
+  const d = (
+    await pool.query(
+      "SELECT COUNT(*)::int n FROM deposits WHERE user_id=$1 AND status='pending'",
+      [ctx.from.id],
+    )
+  ).rows[0];
+  await render(
+    ctx,
+    box(
+      "💰 MY WALLET",
+      `💵 Balance: $${Number(u?.balance || 0).toFixed(2)}\n📦 Total Spent: $${Number(s?.t || 0).toFixed(2)}\n⏳ Pending Deposits: ${d.n}\n\nReady to top up? 🚀`,
+    ),
+    Markup.inlineKeyboard([
+      [cb("➕ Deposit Funds", "deposit")],
+      [cb("🔙 Back", "home")],
+    ]),
+  );
+});
+bot.action("profile", async (ctx) => {
+  await ctx.answerCbQuery();
+  const u = await getUser(ctx.from.id);
+  const o = (
+    await pool.query("SELECT COUNT(*)::int n FROM orders WHERE user_id=$1", [
+      ctx.from.id,
+    ])
+  ).rows[0];
+  await render(
+    ctx,
+    box(
+      "👤 PROFILE",
+      `🆔 User ID: ${ctx.from.id}\n👤 Username: @${ctx.from.username || "N/A"}\n💰 Balance: $${Number(u?.balance || 0).toFixed(2)}\n📦 Orders: ${o.n}`,
+    ),
+    Markup.inlineKeyboard([[cb("🔙 Back", "home")]]),
+  );
+});
+bot.action("my_orders", async (ctx) => {
+  await ctx.answerCbQuery();
+  const r = await pool.query(
+    "SELECT * FROM orders WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10",
+    [ctx.from.id],
+  );
+  await render(
+    ctx,
+    box(
+      "📦 MY ORDERS",
+      r.rows.length
+        ? r.rows
+            .map(
+              (o: any) =>
+                `✅ #${o.id} • ${o.product_name} x${o.quantity} • $${Number(o.total).toFixed(2)}`,
+            )
+            .join("\n")
+        : "No orders yet.",
+    ),
+    Markup.inlineKeyboard([[cb("🔙 Back", "home")]]),
+  );
+});
+bot.action("support", async (ctx) => {
+  await ctx.answerCbQuery();
+  const support =
+    (await getSetting("support_username")) || config.supportUsername;
+  await render(
+    ctx,
+    box("🎧 SUPPORT", `Contact support: ${support}`),
+    Markup.inlineKeyboard([[cb("🔙 Back", "home")]]),
+  );
+});
+bot.action("help", async (ctx) => {
+  await ctx.answerCbQuery();
+  const r = await pool.query(
+    "SELECT * FROM help_items WHERE active=TRUE ORDER BY title",
+  );
+  await render(
+    ctx,
+    box(
+      "❓ HELP",
+      r.rows.length
+        ? r.rows.map((x: any) => `❓ ${x.title}\n${x.content}`).join("\n\n")
+        : "No help articles yet.",
+    ),
+    Markup.inlineKeyboard([[cb("🔙 Back", "home")]]),
+  );
+});
+bot.action(/^buy:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "buy_qty", productId: ctx.match[1] });
+  await render(ctx, "Send quantity:");
+});
+async function completeSupplierOrder(ctx: any, p: any, q: number) {
+  const uid = ctx.from.id,
+    total = Number(p.price) * q,
+    u = await getUser(uid);
+  if (Number(u?.balance || 0) < total)
+    return void render(
+      ctx,
+      "❌ Insufficient wallet balance. Deposit funds first.",
+    );
+  const localRows = (
+      await pool.query(
+        "SELECT * FROM stock_items WHERE product_id=$1 AND sold=FALSE ORDER BY id LIMIT $2",
+        [p.id, q],
+      )
+    ).rows,
+    apiQty = Math.max(0, q - localRows.length),
+    remote = apiQty ? await eliteProduct(String(p.supplier_product_id)) : null;
+  if (apiQty && (!remote || remote.stock < apiQty))
+    return void render(ctx, "❌ Insufficient combined stock.");
+  try {
+    const supplied = apiQty
+        ? await eliteOrder(String(p.supplier_product_id), apiQty)
+        : { items: [], supplierOrderId: "" },
+      c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const locked = (
+        await c.query("SELECT balance FROM users WHERE id=$1 FOR UPDATE", [uid])
+      ).rows[0];
+      if (Number(locked?.balance || 0) < total)
+        throw new Error("Insufficient wallet balance.");
+      const freshLocal = await c.query(
+        "SELECT * FROM stock_items WHERE product_id=$1 AND sold=FALSE ORDER BY id FOR UPDATE LIMIT $2",
+        [p.id, localRows.length],
+      );
+      if (freshLocal.rows.length !== localRows.length)
+        throw new Error("Local stock changed during checkout. Please retry.");
+      const oid = id8(),
+        items = [
+          ...freshLocal.rows.map((x: any) => String(x.value)),
+          ...supplied.items,
+        ];
+      await c.query("UPDATE users SET balance=balance-$1 WHERE id=$2", [
+        total,
+        uid,
+      ]);
+      for (const x of freshLocal.rows)
+        await c.query(
+          "UPDATE stock_items SET sold=TRUE,sold_order_id=$1 WHERE id=$2",
+          [oid, x.id],
+        );
+      await c.query(
+        "INSERT INTO orders(id,user_id,product_id,product_name,quantity,unit_price,total,delivery) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+        [oid, uid, p.id, p.name, q, p.price, total, items.join("\n")],
+      );
+      await c.query("COMMIT");
+      clearState(uid);
+      const note = p.delivery_note ? `\n\n📌 ${p.delivery_note}` : "";
+      await render(
+        ctx,
+        box(
+          "✅ ORDER COMPLETED",
+          `📦 Product: ${p.name}\n🔢 Qty: ${q}\n🆔 Order ID: #${oid}\n💰 Paid: $${total.toFixed(2)}\n\n━━━━━━━━ DELIVERY ━━━━━━━━\n\n${items.map((v: string, i: number) => `${i + 1}.\n${v}`).join("\n\n")}${note}\n\nThank you for shopping with STORE DN CAR.`,
+        ),
+      );
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    } finally {
+      c.release();
+    }
+  } catch (e: any) {
+    await render(
+      ctx,
+      box(
+        "❌ SUPPLIER ORDER FAILED",
+        `${e.message}\n\nYour wallet was not charged.`,
+      ),
+    );
+  }
+}
+async function completeWalletOrder(ctx: any, productId: string, q: number) {
+  const uid = ctx.from.id,
+    c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    const p = (
+      await c.query("SELECT * FROM products WHERE id=$1 FOR UPDATE", [
+        productId,
+      ])
+    ).rows[0];
+    if (!p) throw new Error("Product not found.");
+    const stock = await c.query(
+      "SELECT * FROM stock_items WHERE product_id=$1 AND sold=FALSE ORDER BY id FOR UPDATE LIMIT $2",
+      [p.id, q],
+    );
+    if (stock.rows.length < q) throw new Error("Insufficient stock.");
+    const u = (
+        await c.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [uid])
+      ).rows[0],
+      total = Number(p.price) * q;
+    if (Number(u?.balance || 0) < total)
+      throw new Error("Insufficient wallet balance. Deposit funds first.");
+    const oid = id8(),
+      vals = stock.rows.map((x: any) => x.value);
+    await c.query("UPDATE users SET balance=balance-$1 WHERE id=$2", [
+      total,
+      uid,
+    ]);
+    for (const x of stock.rows)
+      await c.query(
+        "UPDATE stock_items SET sold=TRUE,sold_order_id=$1 WHERE id=$2",
+        [oid, x.id],
+      );
+    await c.query(
+      "INSERT INTO orders(id,user_id,product_id,product_name,quantity,unit_price,total,delivery) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+      [oid, uid, p.id, p.name, q, p.price, total, vals.join("\n")],
+    );
+    await c.query("COMMIT");
+    clearState(uid);
+    await render(
+      ctx,
+      box(
+        "✅ ORDER COMPLETED",
+        `📦 Product: ${p.name}\n🔢 Qty: ${q}\n🆔 Order ID: #${oid}\n💰 Paid: $${total.toFixed(2)}\n\n━━━━━━━━ DELIVERY ━━━━━━━━\n\n${vals.map((v: string, i: number) => `${i + 1}.\n${v}`).join("\n\n")}\n\nThank you for shopping with STORE DN CAR.`,
+      ),
+    );
+  } catch (e: any) {
+    await c.query("ROLLBACK");
+    await render(ctx, `❌ ${e.message}`);
+  } finally {
+    c.release();
+  }
+}
+bot.action("checkout_wallet", async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = getState(ctx.from.id);
+  if (!s || s.step !== "checkout")
+    return void render(ctx, "⌛ Checkout expired. Select the product again.");
+  const p = await getProduct(s.productId);
+  if (p?.supplier_type === "elite" && p.supplier_product_id)
+    return void (await completeSupplierOrder(ctx, p, s.quantity));
+  await completeWalletOrder(ctx, s.productId, s.quantity);
+});
+bot.action(/^checkout_pay:(binance|bep20|trc20)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const s = getState(ctx.from.id);
+  if (!s || s.step !== "checkout")
+    return void render(ctx, "⌛ Checkout expired. Select the product again.");
+  const method = ctx.match[1] as PaymentMethod,
+    key =
+      method === "binance"
+        ? "binance_uid"
+        : method === "bep20"
+          ? "bsc_wallet"
+          : "tron_wallet",
+    receiver = await getSetting(key);
+  if (!receiver)
+    return void render(ctx, "❌ This payment method is not configured.");
+  setState(ctx.from.id, { step: "deposit_txid", method, amount: s.total });
+  await render(
+    ctx,
+    box(
+      "💳 COMPLETE PRODUCT PAYMENT",
+      `Order total: $${s.total.toFixed(2)}\nMethod: ${method.toUpperCase()}\nReceiver: ${receiver}\n\nPay now and send the transaction ID. After credit, use Wallet checkout to receive the product.`,
+    ),
+    Markup.inlineKeyboard([[cb("🔙 Cancel", "shop")]]),
+  );
+});
+bot.action("deposit", async (ctx) => {
+  await ctx.answerCbQuery();
+  const enabled = async (k: string) => (await getSetting(k)) !== "false";
+  const rows: any[] = [];
+  if (await enabled("binance_enabled"))
+    rows.push([cb("🟡 Binance Pay", "deposit_method:binance")]);
+  if (await enabled("bep20_enabled"))
+    rows.push([cb("💎 USDT BEP20", "deposit_method:bep20")]);
+  if (await enabled("trc20_enabled"))
+    rows.push([cb("💎 USDT TRC20", "deposit_method:trc20")]);
+  rows.push([cb("🔙 Back to Wallet", "wallet")]);
+  await render(
+    ctx,
+    box(
+      "➕ DEPOSIT FUNDS",
+      "Choose your payment network:\n\n⚡ Automatic verification • Duplicate protection • Partial credit",
+    ),
+    Markup.inlineKeyboard(rows),
+  );
+});
+bot.action("deposit_binance", async (ctx) => {
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "deposit_amount", method: "binance" });
+  await render(
+    ctx,
+    box(
+      "🟡 BINANCE PAY",
+      "Send the amount you want to deposit in USD.\nExample: 10",
+    ),
+    Markup.inlineKeyboard([[cb("🔙 Cancel", "deposit")]]),
+  );
+});
+bot.action(/^deposit_method:(binance|bep20|trc20)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const method = ctx.match[1] as PaymentMethod,
+    key =
+      method === "binance"
+        ? "binance_uid"
+        : method === "bep20"
+          ? "bsc_wallet"
+          : "tron_wallet",
+    receiver = await getSetting(key);
+  if (!receiver) {
+    await render(
+      ctx,
+      box(
+        "⚠️ METHOD UNAVAILABLE",
+        "Admin has not configured this payment method yet.",
+      ),
+      Markup.inlineKeyboard([[cb("🔙 Back", "deposit")]]),
+    );
+    return;
+  }
+  setState(ctx.from.id, { step: "deposit_amount", method });
+  await render(
+    ctx,
+    box(
+      method === "binance"
+        ? "🟡 BINANCE PAY"
+        : method === "bep20"
+          ? "💎 USDT BEP20"
+          : "💎 USDT TRC20",
+      "How much do you want to deposit?\n\nSend amount in USD, for example: 10",
+    ),
+    Markup.inlineKeyboard([[cb("🔙 Cancel", "deposit")]]),
+  );
+});
+bot.action(
+  /^deposit_more:(binance|bep20|trc20):([0-9]+(?:\.[0-9]+)?)$/,
+  async (ctx) => {
+    await ctx.answerCbQuery();
+    const method = ctx.match[1] as PaymentMethod,
+      amount = Number(ctx.match[2]);
+    setState(ctx.from.id, { step: "deposit_txid", method, amount });
+    const receiver =
+      method === "binance"
+        ? await getSetting("binance_uid")
+        : method === "bep20"
+          ? await getSetting("bsc_wallet")
+          : await getSetting("tron_wallet");
+    await render(
+      ctx,
+      box(
+        "💳 PAY REMAINING AMOUNT",
+        `Remaining: $${amount.toFixed(2)}\nMethod: ${method.toUpperCase()}\nReceiver: ${receiver}\n\nPay the remaining amount, then send its NEW transaction ID.`,
+      ),
+      Markup.inlineKeyboard([[cb("🔙 Cancel", "wallet")]]),
+    );
+  },
+);
+bot.action(/^deposit_approve:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    const d = (
+      await c.query("SELECT * FROM deposits WHERE id=$1 FOR UPDATE", [
+        ctx.match[1],
+      ])
+    ).rows[0];
+    if (!d || d.status !== "pending") {
+      await c.query("ROLLBACK");
+      await render(
+        ctx,
+        "ℹ️ This transaction has already been processed and cannot be reused.",
+      );
+      return;
+    }
+    const verified = Number(d.received_amount || d.amount),
+      already = Number(d.credited_amount || 0),
+      credit = Math.max(0, verified - already);
+    await c.query(
+      "UPDATE deposits SET status='approved',credited_amount=credited_amount+$1,reviewed_by=$2,reviewed_at=NOW() WHERE id=$3",
+      [credit, ctx.from.id, d.id],
+    );
+    if (credit > 0) {
+      await c.query("UPDATE users SET balance=balance+$1 WHERE id=$2", [
+        credit,
+        d.user_id,
+      ]);
+      await c.query(
+        "INSERT INTO balance_ledger(user_id,amount,reason,admin_id) VALUES($1,$2,$3,$4)",
+        [
+          d.user_id,
+          credit,
+          `${String(d.method).toUpperCase()} deposit #${d.id}`,
+          ctx.from.id,
+        ],
+      );
+    }
+    await c.query("COMMIT");
+    const u = await getUser(Number(d.user_id));
+    await render(
+      ctx,
+      box(
+        "✅ DEPOSIT APPROVED",
+        `ID: #${d.id}\nUser: ${d.user_id}\nMethod: ${String(d.method).toUpperCase()}\nCredited: $${credit.toFixed(2)}\n\nTransaction is now locked forever.`,
+      ),
+    );
+    await bot.telegram.sendMessage(
+      d.user_id,
+      box(
+        "✅ PAYMENT APPROVED",
+        `Received: $${verified.toFixed(2)}\nAdded to wallet: $${credit.toFixed(2)}\nNew balance: $${Number(u?.balance || 0).toFixed(2)}\nDeposit ID: #${d.id}`,
+      ),
+      Markup.inlineKeyboard([[cb("💰 Open Wallet", "wallet")]]),
+    );
+  } catch (e) {
+    await c.query("ROLLBACK");
+    throw e;
+  } finally {
+    c.release();
+  }
+});
+bot.action(/^deposit_reject:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const r = await pool.query(
+    "UPDATE deposits SET status='rejected',reviewed_by=$1,reviewed_at=NOW() WHERE id=$2 AND status='pending' RETURNING *",
+    [ctx.from.id, ctx.match[1]],
+  );
+  if (!r.rows[0]) {
+    await render(ctx, "ℹ️ This transaction has already been processed.");
+    return;
+  }
+  const d = r.rows[0];
+  await render(
+    ctx,
+    box(
+      "❌ DEPOSIT REJECTED",
+      `ID: #${d.id}\nUser: ${d.user_id}\nTXID locked — it can never be submitted again.`,
+    ),
+  );
+  await bot.telegram.sendMessage(
+    d.user_id,
+    box(
+      "❌ PAYMENT REJECTED",
+      `Deposit #${d.id} was rejected.\nThis transaction ID is permanently locked and cannot be reused.\nContact support if you believe this is a mistake.`,
+    ),
+  );
+});
 
-bot.action("admin_home",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await admin(ctx)});bot.action("admin_tools",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await tools(ctx)});bot.action(/^admin_tool:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await tool(ctx,ctx.match[1])});
-bot.action("admin_product_location",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const ps=await getProducts(),rows=ps.slice(0,90).map((p:any,i:number)=>[cb(`${i+1}. ${p.name}`,`location_pick:${p.id}`)]);rows.push([cb("🔙 Back","admin_home")]);await render(ctx,box("🔢 PRODUCT LOCATION","Select the product you want to move:"),Markup.inlineKeyboard(rows))});
-bot.action(/^location_pick:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"product_location",productId:ctx.match[1]});const p=await getProduct(ctx.match[1]),total=(await getProducts()).length;await render(ctx,box("🔢 SET PRODUCT POSITION",`Product: ${p?.name||ctx.match[1]}\n\nSend its new position number from 1 to ${total}.\nExample: 1 or 10`),Markup.inlineKeyboard([[cb("🔙 Cancel","admin_product_location")]]))});
-bot.action("admin_add_tool",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"add_product_name"});await render(ctx,"Send tool name:")});
-bot.action(/^field:([^:]+):(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const field=ctx.match[1];const allowed=new Set(["price","warranty","description","note","delivery_note","delivery_template","name"]);if(!allowed.has(field))return;setState(ctx.from.id,{step:"field",field,productId:ctx.match[2],numeric:field==="price"});await render(ctx,`Send new ${field.replaceAll("_"," ")}:`)});
-bot.action(/^clear:(note|delivery_note):(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await pool.query(`UPDATE products SET ${ctx.match[1]}='' WHERE id=$1`,[ctx.match[2]]);await render(ctx,"✅ Updated.")});
-bot.action(/^toggle:(stock_enabled|preorder_enabled|client_mail_activation):(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await pool.query(`UPDATE products SET ${ctx.match[1]}=NOT ${ctx.match[1]} WHERE id=$1`,[ctx.match[2]]);await tool(ctx,ctx.match[2])});
-bot.action("supplier_import_all",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery("Importing Elite products…");try{const remote=await eliteProducts();let added=0,skipped=0;for(const p of remote){const exists=await pool.query("SELECT id FROM products WHERE supplier_type='elite' AND supplier_product_id=$1",[p.id]);if(exists.rowCount){await pool.query("UPDATE products SET supplier_emoji_id=$1 WHERE id=$2",[p.emojiId,exists.rows[0].id]);skipped++;continue}let id=`ELITE_${Buffer.from(p.id).toString("hex").slice(0,24).toUpperCase()}`;if(await getProduct(id))id=id8();await pool.query("INSERT INTO products(id,name,price,warranty,description,supplier_type,supplier_product_id,supplier_name,supplier_emoji_id) VALUES($1,$2,$3,$4,$5,'elite',$6,$2,$7)",[id,p.name,p.price,"NO WARRANTY",p.description,p.id,p.emojiId]);added++}await render(ctx,box("✅ ELITE PRODUCTS IMPORTED",`Supplier products: ${remote.length}\n✅ Added: ${added}\n♻️ Already linked/skipped: ${skipped}\n\nNames, descriptions, prices and premium emojis were copied. You can edit product details anytime.`),Markup.inlineKeyboard([[cb("📦 Tool Management","admin_tools")]]))}catch(e:any){await render(ctx,box("❌ IMPORT FAILED",e.message),Markup.inlineKeyboard([[cb("🔙 Tool Management","admin_tools")]]))}});
-bot.action("supplier_status",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();try{const ps=await eliteProducts();await render(ctx,box("🔌 ELITE SUPPLIER API",`✅ Connected successfully\n📦 Products found: ${ps.length}\n\nOpen any tool and press Link Supplier API.`),Markup.inlineKeyboard([[cb("🔙 Tool Management","admin_tools")]]))}catch(e:any){await render(ctx,box("❌ SUPPLIER CONNECTION FAILED",e.message),Markup.inlineKeyboard([[cb("🔙 Tool Management","admin_tools")]]))}});
-bot.action(/^supplier:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery("Fetching Elite products…");try{const ps=await eliteProducts();setState(ctx.from.id,{step:"supplier_pick",productId:ctx.match[1]});const rows=ps.slice(0,80).map((p:any)=>[cb(`${p.stock>0?"🟢":"🔴"} ${p.name} • $${p.price.toFixed(2)} • ${p.stock}`,`supplier_pick:${encodeURIComponent(p.id)}`)]);rows.push([cb("🔙 Back",`admin_tool:${ctx.match[1]}`)]);await render(ctx,box("🔌 SELECT ELITE PRODUCT",ps.length?`Fetched ${ps.length} products.\nChoose the supplier product to link:`:"Supplier returned no products."),Markup.inlineKeyboard(rows))}catch(e:any){await render(ctx,box("❌ SUPPLIER API ERROR",e.message),Markup.inlineKeyboard([[cb("🔙 Back",`admin_tool:${ctx.match[1]}`)]]))}});
-bot.action(/^supplier_pick:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const s=getState(ctx.from.id);if(!s||s.step!=="supplier_pick")return void render(ctx,"⌛ Supplier selection expired. Open the tool again.");const remoteId=decodeURIComponent(ctx.match[1]),remote=await eliteProduct(remoteId);if(!remote)return void render(ctx,"❌ Supplier product is no longer available.");await pool.query("UPDATE products SET supplier_type='elite',supplier_product_id=$1,supplier_name=$2,supplier_emoji_id=$3 WHERE id=$4",[remote.id,remote.name,remote.emojiId,s.productId]);clearState(ctx.from.id);await render(ctx,box("✅ SUPPLIER LINKED",`Local tool is now linked to:\n📦 ${remote.name}\n💵 Supplier price: $${remote.price.toFixed(2)}\n📊 Live stock: ${remote.stock}\n\nOrders will be purchased and delivered automatically.`),Markup.inlineKeyboard([[cb("📦 Back to Tool",`admin_tool:${s.productId}`)]]))});
-bot.action(/^supplier_unlink:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await pool.query("UPDATE products SET supplier_type='',supplier_product_id='',supplier_name='',supplier_emoji_id='' WHERE id=$1",[ctx.match[1]]);await render(ctx,box("✅ SUPPLIER UNLINKED","This tool now uses local bot stock again."),Markup.inlineKeyboard([[cb("📦 Back to Tool",`admin_tool:${ctx.match[1]}`)]]))});
-bot.action(/^subtool_add:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await render(ctx,"Sub-tool framework is included; full Telegram creation wizard is the next extension point.")});
-bot.action(/^subtool_manage:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const r=await pool.query("SELECT * FROM products WHERE parent_id=$1 ORDER BY name",[ctx.match[1]]);await render(ctx,box("🧰 SUB TOOLS",r.rows.length?r.rows.map((p:any)=>`📦 ${p.name}`).join("\n"):"No sub-tools."))});
-bot.action(/^remove_tool:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await render(ctx,box("⚠️ REMOVE TOOL?","This removes the product and its stock."),Markup.inlineKeyboard([[cb("🗑 YES, REMOVE",`remove_tool_yes:${ctx.match[1]}`)],[cb("❌ Cancel",`admin_tool:${ctx.match[1]}`)]]))});
-bot.action(/^remove_tool_yes:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await pool.query("DELETE FROM products WHERE id=$1",[ctx.match[1]]);await render(ctx,"✅ Tool removed.");await tools(ctx)});
+bot.action("admin_home", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await admin(ctx);
+});
+bot.action("admin_tools", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await tools(ctx);
+});
+bot.action(/^admin_tool:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await tool(ctx, ctx.match[1]);
+});
+bot.action("admin_product_location", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const ps = await getProducts(),
+    rows = ps
+      .slice(0, 90)
+      .map((p: any, i: number) => [
+        cb(`${i + 1}. ${p.name}`, `location_pick:${p.id}`),
+      ]);
+  rows.push([cb("🔙 Back", "admin_home")]);
+  await render(
+    ctx,
+    box("🔢 PRODUCT LOCATION", "Select the product you want to move:"),
+    Markup.inlineKeyboard(rows),
+  );
+});
+bot.action(/^location_pick:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "product_location", productId: ctx.match[1] });
+  const p = await getProduct(ctx.match[1]),
+    total = (await getProducts()).length;
+  await render(
+    ctx,
+    box(
+      "🔢 SET PRODUCT POSITION",
+      `Product: ${p?.name || ctx.match[1]}\n\nSend its new position number from 1 to ${total}.\nExample: 1 or 10`,
+    ),
+    Markup.inlineKeyboard([[cb("🔙 Cancel", "admin_product_location")]]),
+  );
+});
+bot.action("admin_add_tool", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "add_product_name" });
+  await render(ctx, "Send tool name:");
+});
+bot.action(/^field:([^:]+):(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const field = ctx.match[1];
+  const allowed = new Set([
+    "price",
+    "warranty",
+    "description",
+    "note",
+    "delivery_note",
+    "delivery_template",
+    "name",
+  ]);
+  if (!allowed.has(field)) return;
+  setState(ctx.from.id, {
+    step: "field",
+    field,
+    productId: ctx.match[2],
+    numeric: field === "price",
+  });
+  await render(ctx, `Send new ${field.replaceAll("_", " ")}:`);
+});
+bot.action(/^clear:(note|delivery_note):(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await pool.query(`UPDATE products SET ${ctx.match[1]}='' WHERE id=$1`, [
+    ctx.match[2],
+  ]);
+  await render(ctx, "✅ Updated.");
+});
+bot.action(
+  /^toggle:(stock_enabled|preorder_enabled|client_mail_activation):(.+)$/,
+  async (ctx) => {
+    if (!(await hasAdminAccess(ctx))) return;
+    await ctx.answerCbQuery();
+    await pool.query(
+      `UPDATE products SET ${ctx.match[1]}=NOT ${ctx.match[1]} WHERE id=$1`,
+      [ctx.match[2]],
+    );
+    await tool(ctx, ctx.match[2]);
+  },
+);
+bot.action("supplier_import_all", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery("Importing Elite products…");
+  try {
+    const remote = await eliteProducts();
+    let added = 0,
+      skipped = 0;
+    for (const p of remote) {
+      const exists = await pool.query(
+        "SELECT id FROM products WHERE supplier_type='elite' AND supplier_product_id=$1",
+        [p.id],
+      );
+      if (exists.rowCount) {
+        await pool.query(
+          "UPDATE products SET supplier_emoji_id=$1 WHERE id=$2",
+          [p.emojiId, exists.rows[0].id],
+        );
+        skipped++;
+        continue;
+      }
+      let id = `ELITE_${Buffer.from(p.id).toString("hex").slice(0, 24).toUpperCase()}`;
+      if (await getProduct(id)) id = id8();
+      await pool.query(
+        "INSERT INTO products(id,name,price,warranty,description,supplier_type,supplier_product_id,supplier_name,supplier_emoji_id) VALUES($1,$2,$3,$4,$5,'elite',$6,$2,$7)",
+        [id, p.name, p.price, "NO WARRANTY", p.description, p.id, p.emojiId],
+      );
+      added++;
+    }
+    await render(
+      ctx,
+      box(
+        "✅ ELITE PRODUCTS IMPORTED",
+        `Supplier products: ${remote.length}\n✅ Added: ${added}\n♻️ Already linked/skipped: ${skipped}\n\nNames, descriptions, prices and premium emojis were copied. You can edit product details anytime.`,
+      ),
+      Markup.inlineKeyboard([[cb("📦 Tool Management", "admin_tools")]]),
+    );
+  } catch (e: any) {
+    await render(
+      ctx,
+      box("❌ IMPORT FAILED", e.message),
+      Markup.inlineKeyboard([[cb("🔙 Tool Management", "admin_tools")]]),
+    );
+  }
+});
+bot.action("supplier_status", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  try {
+    const ps = await eliteProducts();
+    await render(
+      ctx,
+      box(
+        "🔌 ELITE SUPPLIER API",
+        `✅ Connected successfully\n📦 Products found: ${ps.length}\n\nOpen any tool and press Link Supplier API.`,
+      ),
+      Markup.inlineKeyboard([[cb("🔙 Tool Management", "admin_tools")]]),
+    );
+  } catch (e: any) {
+    await render(
+      ctx,
+      box("❌ SUPPLIER CONNECTION FAILED", e.message),
+      Markup.inlineKeyboard([[cb("🔙 Tool Management", "admin_tools")]]),
+    );
+  }
+});
+bot.action(/^supplier:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery("Fetching Elite products…");
+  try {
+    const ps = await eliteProducts();
+    setState(ctx.from.id, { step: "supplier_pick", productId: ctx.match[1] });
+    const rows = ps
+      .slice(0, 80)
+      .map((p: any) => [
+        cb(
+          `${p.stock > 0 ? "🟢" : "🔴"} ${p.name} • $${p.price.toFixed(2)} • ${p.stock}`,
+          `supplier_pick:${encodeURIComponent(p.id)}`,
+        ),
+      ]);
+    rows.push([cb("🔙 Back", `admin_tool:${ctx.match[1]}`)]);
+    await render(
+      ctx,
+      box(
+        "🔌 SELECT ELITE PRODUCT",
+        ps.length
+          ? `Fetched ${ps.length} products.\nChoose the supplier product to link:`
+          : "Supplier returned no products.",
+      ),
+      Markup.inlineKeyboard(rows),
+    );
+  } catch (e: any) {
+    await render(
+      ctx,
+      box("❌ SUPPLIER API ERROR", e.message),
+      Markup.inlineKeyboard([[cb("🔙 Back", `admin_tool:${ctx.match[1]}`)]]),
+    );
+  }
+});
+bot.action(/^supplier_pick:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const s = getState(ctx.from.id);
+  if (!s || s.step !== "supplier_pick")
+    return void render(
+      ctx,
+      "⌛ Supplier selection expired. Open the tool again.",
+    );
+  const remoteId = decodeURIComponent(ctx.match[1]),
+    remote = await eliteProduct(remoteId);
+  if (!remote)
+    return void render(ctx, "❌ Supplier product is no longer available.");
+  await pool.query(
+    "UPDATE products SET supplier_type='elite',supplier_product_id=$1,supplier_name=$2,supplier_emoji_id=$3 WHERE id=$4",
+    [remote.id, remote.name, remote.emojiId, s.productId],
+  );
+  clearState(ctx.from.id);
+  await render(
+    ctx,
+    box(
+      "✅ SUPPLIER LINKED",
+      `Local tool is now linked to:\n📦 ${remote.name}\n💵 Supplier price: $${remote.price.toFixed(2)}\n📊 Live stock: ${remote.stock}\n\nOrders will be purchased and delivered automatically.`,
+    ),
+    Markup.inlineKeyboard([
+      [cb("📦 Back to Tool", `admin_tool:${s.productId}`)],
+    ]),
+  );
+});
+bot.action(/^supplier_unlink:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await pool.query(
+    "UPDATE products SET supplier_type='',supplier_product_id='',supplier_name='',supplier_emoji_id='' WHERE id=$1",
+    [ctx.match[1]],
+  );
+  await render(
+    ctx,
+    box("✅ SUPPLIER UNLINKED", "This tool now uses local bot stock again."),
+    Markup.inlineKeyboard([
+      [cb("📦 Back to Tool", `admin_tool:${ctx.match[1]}`)],
+    ]),
+  );
+});
+bot.action(/^subtool_add:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await render(
+    ctx,
+    "Sub-tool framework is included; full Telegram creation wizard is the next extension point.",
+  );
+});
+bot.action(/^subtool_manage:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const r = await pool.query(
+    "SELECT * FROM products WHERE parent_id=$1 ORDER BY name",
+    [ctx.match[1]],
+  );
+  await render(
+    ctx,
+    box(
+      "🧰 SUB TOOLS",
+      r.rows.length
+        ? r.rows.map((p: any) => `📦 ${p.name}`).join("\n")
+        : "No sub-tools.",
+    ),
+  );
+});
+bot.action(/^remove_tool:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await render(
+    ctx,
+    box("⚠️ REMOVE TOOL?", "This removes the product and its stock."),
+    Markup.inlineKeyboard([
+      [cb("🗑 YES, REMOVE", `remove_tool_yes:${ctx.match[1]}`)],
+      [cb("❌ Cancel", `admin_tool:${ctx.match[1]}`)],
+    ]),
+  );
+});
+bot.action(/^remove_tool_yes:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await pool.query("DELETE FROM products WHERE id=$1", [ctx.match[1]]);
+  await render(ctx, "✅ Tool removed.");
+  await tools(ctx);
+});
 
-bot.action("admin_manage",async ctx=>{if(Number(ctx.from.id)!==config.adminId){await ctx.answerCbQuery("Only the main owner can manage admins.",{show_alert:true});return}await ctx.answerCbQuery();const r=await pool.query("SELECT id,created_at FROM admins ORDER BY created_at");const list=[`👑 Main Owner: ${config.adminId}`,...r.rows.map((x:any,i:number)=>`🛡 Admin ${i+1}: ${x.id}`)].join("\n");await render(ctx,box("👑 ADMIN MANAGEMENT",`${list}\n\nKeep the squad trusted 🔐`),Markup.inlineKeyboard([[cb("➕ Add New Admin","admin_add")],[cb("➖ Remove Admin","admin_remove")],[cb("🔙 Back","admin_home")]]))});
-bot.action("admin_add",async ctx=>{if(Number(ctx.from.id)!==config.adminId)return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"admin_add"});await render(ctx,box("➕ ADD ADMIN","Send the new admin's Telegram numeric User ID."),Markup.inlineKeyboard([[cb("🔙 Cancel","admin_manage")]]))});
-bot.action("admin_remove",async ctx=>{if(Number(ctx.from.id)!==config.adminId)return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"admin_remove"});await render(ctx,box("➖ REMOVE ADMIN","Send the admin's Telegram numeric User ID.\nThe main owner can never be removed."),Markup.inlineKeyboard([[cb("🔙 Cancel","admin_manage")]]))});
+bot.action("admin_manage", async (ctx) => {
+  if (Number(ctx.from.id) !== config.adminId) {
+    await ctx.answerCbQuery("Only the main owner can manage admins.", {
+      show_alert: true,
+    });
+    return;
+  }
+  await ctx.answerCbQuery();
+  const r = await pool.query(
+    "SELECT id,created_at FROM admins ORDER BY created_at",
+  );
+  const list = [
+    `👑 Main Owner: ${config.adminId}`,
+    ...r.rows.map((x: any, i: number) => `🛡 Admin ${i + 1}: ${x.id}`),
+  ].join("\n");
+  await render(
+    ctx,
+    box("👑 ADMIN MANAGEMENT", `${list}\n\nKeep the squad trusted 🔐`),
+    Markup.inlineKeyboard([
+      [cb("➕ Add New Admin", "admin_add")],
+      [cb("➖ Remove Admin", "admin_remove")],
+      [cb("🔙 Back", "admin_home")],
+    ]),
+  );
+});
+bot.action("admin_add", async (ctx) => {
+  if (Number(ctx.from.id) !== config.adminId) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "admin_add" });
+  await render(
+    ctx,
+    box("➕ ADD ADMIN", "Send the new admin's Telegram numeric User ID."),
+    Markup.inlineKeyboard([[cb("🔙 Cancel", "admin_manage")]]),
+  );
+});
+bot.action("admin_remove", async (ctx) => {
+  if (Number(ctx.from.id) !== config.adminId) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "admin_remove" });
+  await render(
+    ctx,
+    box(
+      "➖ REMOVE ADMIN",
+      "Send the admin's Telegram numeric User ID.\nThe main owner can never be removed.",
+    ),
+    Markup.inlineKeyboard([[cb("🔙 Cancel", "admin_manage")]]),
+  );
+});
 
-bot.action("admin_stock",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await render(ctx,box("📦 Stock Management","Choose an action:"),Markup.inlineKeyboard([[cb("➕ Add Stock","stock_add_pick"),cb("➖ Remove Stock","stock_remove_pick")],[cb("✅ Sold Stock","stock_sold"),cb("📦 Unsold Stock","stock_unsold")],[cb("📊 Stock Overview","stock_overview")],[cb("🔙 Back","admin_home")]]))});
-bot.action("stock_add_pick",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await picker(ctx,"stock_add","➕ ADD STOCK")});bot.action(/^stock_add:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"add_stock",productId:ctx.match[1]});await render(ctx,"Paste stock now. Each non-empty line = one item.")});
-bot.action("stock_remove_pick",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await picker(ctx,"stock_remove","➖ REMOVE STOCK")});bot.action(/^stock_remove:(.+)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"remove_stock",productId:ctx.match[1]});await render(ctx,"Send quantity to remove from beginning of stock:")});
-bot.action("stock_overview",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const ps=await getProducts();const l=[];for(const p of ps){const n=await stockCount(p.id);l.push(`${n>5?"🟢":n>0?"🟡":"🔴"} ${p.name} — ${n}`)}await render(ctx,box("📊 STOCK OVERVIEW",l.join("\n")||"No products."))});
-bot.action("stock_unsold",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const r=await pool.query("SELECT product_id,COUNT(*)::int n FROM stock_items WHERE sold=FALSE GROUP BY product_id");await render(ctx,box("📦 UNSOLD STOCK",r.rows.length?r.rows.map((x:any)=>`${x.product_id}: ${x.n}`).join("\n"):"No unsold stock."))});
-bot.action("stock_sold",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const r=await pool.query("SELECT product_id,COUNT(*)::int n FROM stock_items WHERE sold=TRUE GROUP BY product_id");await render(ctx,box("✅ SOLD STOCK",r.rows.length?r.rows.map((x:any)=>`${x.product_id}: ${x.n}`).join("\n"):"No sold stock."))});
+bot.action("admin_stock", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await render(
+    ctx,
+    box("📦 Stock Management", "Choose an action:"),
+    Markup.inlineKeyboard([
+      [
+        cb("➕ Add Stock", "stock_add_pick"),
+        cb("➖ Remove Stock", "stock_remove_pick"),
+      ],
+      [
+        cb("✅ Sold Stock", "stock_sold"),
+        cb("📦 Unsold Stock", "stock_unsold"),
+      ],
+      [cb("📊 Stock Overview", "stock_overview")],
+      [cb("🔙 Back", "admin_home")],
+    ]),
+  );
+});
+bot.action("stock_add_pick", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await picker(ctx, "stock_add", "➕ ADD STOCK");
+});
+bot.action(/^stock_add:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "add_stock", productId: ctx.match[1] });
+  await render(ctx, "Paste stock now. Each non-empty line = one item.");
+});
+bot.action("stock_remove_pick", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await picker(ctx, "stock_remove", "➖ REMOVE STOCK");
+});
+bot.action(/^stock_remove:(.+)$/, async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "remove_stock", productId: ctx.match[1] });
+  await render(ctx, "Send quantity to remove from beginning of stock:");
+});
+bot.action("stock_overview", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const ps = await getProducts();
+  const l = [];
+  for (const p of ps) {
+    const n = await stockCount(p.id);
+    l.push(`${n > 5 ? "🟢" : n > 0 ? "🟡" : "🔴"} ${p.name} — ${n}`);
+  }
+  await render(ctx, box("📊 STOCK OVERVIEW", l.join("\n") || "No products."));
+});
+bot.action("stock_unsold", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const r = await pool.query(
+    "SELECT product_id,COUNT(*)::int n FROM stock_items WHERE sold=FALSE GROUP BY product_id",
+  );
+  await render(
+    ctx,
+    box(
+      "📦 UNSOLD STOCK",
+      r.rows.length
+        ? r.rows.map((x: any) => `${x.product_id}: ${x.n}`).join("\n")
+        : "No unsold stock.",
+    ),
+  );
+});
+bot.action("stock_sold", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const r = await pool.query(
+    "SELECT product_id,COUNT(*)::int n FROM stock_items WHERE sold=TRUE GROUP BY product_id",
+  );
+  await render(
+    ctx,
+    box(
+      "✅ SOLD STOCK",
+      r.rows.length
+        ? r.rows.map((x: any) => `${x.product_id}: ${x.n}`).join("\n")
+        : "No sold stock.",
+    ),
+  );
+});
 
-for(const [a,k] of [["admin_balance_add","add"],["admin_balance_remove","remove"],["admin_balance_check","check"]] as const){bot.action(a,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"balance_user",action:k});await render(ctx,"Send Telegram User ID:")})}
-bot.action("admin_track",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"track_order"});await render(ctx,"Send Order ID:")});bot.action("admin_broadcast",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"broadcast"});await render(ctx,"Send broadcast text:")});
-bot.action("admin_coupons",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const r=await pool.query("SELECT * FROM coupons WHERE active=TRUE ORDER BY created_at DESC");await render(ctx,box("🎟 COUPONS",r.rows.length?r.rows.map((x:any)=>`${x.code} — ${Number(x.percent)}%`).join("\n"):"No active coupons."),Markup.inlineKeyboard([[cb("➕ Create Coupon","coupon_create")],[cb("🔙 Back","admin_home")]]))});bot.action("coupon_create",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"coupon_code"});await render(ctx,"Send coupon code:")});
-bot.action("admin_help",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const r=await pool.query("SELECT * FROM help_items ORDER BY title");await render(ctx,box("❓ HELP MANAGE",r.rows.length?r.rows.map((x:any)=>`• ${x.title}`).join("\n"):"No help items."),Markup.inlineKeyboard([[cb("➕ Add Help Button","help_create")],[cb("🔙 Back","admin_home")]]))});bot.action("help_create",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();setState(ctx.from.id,{step:"help_title"});await render(ctx,"Send help title:")});
-async function showPaymentSettings(ctx:any){const vals:any={};for(const k of ["wallet_enabled","bep20_enabled","trc20_enabled","binance_enabled"]){const r=await pool.query("SELECT value FROM settings WHERE key=$1",[k]);vals[k]=r.rows[0]?.value!=="false"}const api=await getSetting("binance_api_key"),secret=await getSetting("binance_secret_key"),merchant=await getSetting("binance_merchant_id"),bsc=await getSetting("bsc_wallet"),tron=await getSetting("tron_wallet"),uid=await getSetting("binance_uid"),scan=await getSetting("bscscan_api_key"),tronKey=await getSetting("trongrid_api_key");await render(ctx,box("💳 PAYMENT SETTINGS",`🔑 Binance API: ${shown(api,true)}\n🔐 Secret Key: ${shown(secret,true)}\n🏦 Merchant ID: ${shown(merchant)}\n💼 BSC Wallet: ${shown(bsc)}\n💎 TRON Wallet: ${shown(tron)}\n🟡 Binance UID: ${shown(uid)}\n🔎 BSCScan API: ${shown(scan,true)}\n🌐 TRON API: ${shown(tronKey,true)}\n\nActive Methods:\n💰 Wallet: ${vals.wallet_enabled?"✅ ON":"❌ OFF"}\n💎 USDT BEP20: ${vals.bep20_enabled?"✅ ON":"❌ OFF"}\n💎 USDT TRC20: ${vals.trc20_enabled?"✅ ON":"❌ OFF"}\n⚡ Binance Pay: ${vals.binance_enabled?"✅ ON":"❌ OFF"}`),Markup.inlineKeyboard([[cb("🔑 Binance API Key","edit_setting:binance_api_key:admin_payment"),cb("🔐 Secret Key","edit_setting:binance_secret_key:admin_payment")],[cb("🏦 Merchant ID","edit_setting:binance_merchant_id:admin_payment")],[cb("💼 BSC Wallet (BEP20)","edit_setting:bsc_wallet:admin_payment")],[cb("💎 TRON Wallet (TRC20)","edit_setting:tron_wallet:admin_payment")],[cb("🟡 Binance UID","edit_setting:binance_uid:admin_payment")],[cb("🔎 BSCScan Key","edit_setting:bscscan_api_key:admin_payment"),cb("🌐 TRON API Key","edit_setting:trongrid_api_key:admin_payment")],[cb(`💰 Wallet: ${vals.wallet_enabled?"✅":"❌"}`,"pay:wallet_enabled"),cb(`💎 BEP20: ${vals.bep20_enabled?"✅":"❌"}`,"pay:bep20_enabled")],[cb(`💎 TRC20: ${vals.trc20_enabled?"✅":"❌"}`,"pay:trc20_enabled"),cb(`⚡ Pay: ${vals.binance_enabled?"✅":"❌"}`,"pay:binance_enabled")],[cb("🧙 Run Setup Wizard","payment_wizard")],[cb("🔙 Back","admin_home")]]));}
-async function showStoreSettings(ctx:any){const support=await getSetting("support_username"),uid=await getSetting("binance_uid"),name=await getSetting("binance_name"),wallet=await getSetting("binance_wallet"),bsc=await getSetting("bsc_wallet"),tron=await getSetting("tron_wallet"),scan=await getSetting("bscscan_api_key"),ref=await getSetting("referral_bonus"),reg=await getSetting("registration_bonus"),maintenance=(await getSetting("maintenance_enabled"))==="true";await render(ctx,box("⚙️ STORE SETTINGS",`📞 Support: ${shown(support)}\n🟡 Binance UID: ${shown(uid)}\n👤 Binance Name: ${shown(name)}\n💼 Binance Wallet: ${shown(wallet)}\n💎 BSC Wallet: ${shown(bsc)}\n💎 TRON Wallet: ${shown(tron)}\n🔎 BSCScan API: ${shown(scan,true)}\n💰 Referral Bonus: $${Number(ref||0).toFixed(2)}\n🎁 Registration Bonus: $${Number(reg||0).toFixed(2)}\n🔧 Maintenance: ${maintenance?"🔴 ON":"🟢 OFF"}`),Markup.inlineKeyboard([[cb("📞 Support Username","edit_setting:support_username:admin_settings")],[cb("🟡 Binance UID","edit_setting:binance_uid:admin_settings"),cb("👤 Binance Name","edit_setting:binance_name:admin_settings")],[cb("💼 Binance Wallet","edit_setting:binance_wallet:admin_settings")],[cb("💎 BSC Wallet (BEP20)","edit_setting:bsc_wallet:admin_settings")],[cb("💎 TRON Wallet (TRC20)","edit_setting:tron_wallet:admin_settings")],[cb("🔎 BSCScan API Key","edit_setting:bscscan_api_key:admin_settings")],[cb("💰 Referral Bonus","edit_setting:referral_bonus:admin_settings"),cb("🎁 Reg Bonus","edit_setting:registration_bonus:admin_settings")],[cb("📝 Maintenance Msg","edit_setting:maintenance_message:admin_settings")],[cb(maintenance?"🟢 Disable Maintenance":"🔴 Enable Maintenance","toggle_maintenance")],[cb("🔙 Back","admin_home")]]));}
-bot.action("admin_payment",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await showPaymentSettings(ctx)});
-bot.action("admin_settings",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();await showStoreSettings(ctx)});
-bot.action(/^edit_setting:([^:]+):(admin_payment|admin_settings)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await settingButton(ctx,ctx.match[1],ctx.match[2] as "admin_payment"|"admin_settings")});
-bot.action(/^pay:(wallet_enabled|bep20_enabled|trc20_enabled|binance_enabled)$/,async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery("Updated ✅");const k=ctx.match[1],current=await getSetting(k);await setSetting(k,current==="false"?"true":"false");await showPaymentSettings(ctx)});
-bot.action("toggle_maintenance",async ctx=>{if(Number(ctx.from.id)!==config.adminId)return;await ctx.answerCbQuery("Maintenance updated ✅");await setSetting("maintenance_enabled",(await getSetting("maintenance_enabled"))==="true"?"false":"true");await showStoreSettings(ctx)});
-bot.action("payment_wizard",async ctx=>{if(Number(ctx.from.id)!==config.adminId)return;await ctx.answerCbQuery();await render(ctx,box("🧙 PAYMENT SETUP WIZARD","Set the items in this order:\n1. Binance UID\n2. Binance Name\n3. Binance API + Secret\n4. Merchant ID\n5. BSC/TRON wallets\n6. Enable the payment methods\n\nOpen any field below to configure it."),Markup.inlineKeyboard([[cb("🟡 Start with Binance UID","edit_setting:binance_uid:admin_payment")],[cb("🔙 Payment Settings","admin_payment")]]))});
-bot.action("admin_dashboard",async ctx=>{if(!await hasAdminAccess(ctx))return;await ctx.answerCbQuery();const [u,p,o,s,st]=await Promise.all([pool.query("SELECT COUNT(*)::int n FROM users"),pool.query("SELECT COUNT(*)::int n FROM products"),pool.query("SELECT COUNT(*)::int n FROM orders"),pool.query("SELECT COALESCE(SUM(total),0) t FROM orders WHERE created_at::date=CURRENT_DATE"),pool.query("SELECT COUNT(*)::int n FROM stock_items WHERE sold=FALSE")]);await render(ctx,box("📊 DASHBOARD",`👥 Users: ${u.rows[0].n}\n📦 Products: ${p.rows[0].n}\n🧾 Orders: ${o.rows[0].n}\n💰 Sales Today: $${Number(s.rows[0].t).toFixed(2)}\n📊 Unsold Stock: ${st.rows[0].n}`))});
+for (const [a, k] of [
+  ["admin_balance_add", "add"],
+  ["admin_balance_remove", "remove"],
+  ["admin_balance_check", "check"],
+] as const) {
+  bot.action(a, async (ctx) => {
+    if (!(await hasAdminAccess(ctx))) return;
+    await ctx.answerCbQuery();
+    setState(ctx.from.id, { step: "balance_user", action: k });
+    await render(ctx, "Send Telegram User ID:");
+  });
+}
+bot.action("admin_track", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "track_order" });
+  await render(ctx, "Send Order ID:");
+});
+bot.action("admin_broadcast", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "broadcast" });
+  await render(ctx, "Send broadcast text:");
+});
+bot.action("admin_coupons", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const r = await pool.query(
+    "SELECT * FROM coupons WHERE active=TRUE ORDER BY created_at DESC",
+  );
+  await render(
+    ctx,
+    box(
+      "🎟 COUPONS",
+      r.rows.length
+        ? r.rows.map((x: any) => `${x.code} — ${Number(x.percent)}%`).join("\n")
+        : "No active coupons.",
+    ),
+    Markup.inlineKeyboard([
+      [cb("➕ Create Coupon", "coupon_create")],
+      [cb("🔙 Back", "admin_home")],
+    ]),
+  );
+});
+bot.action("coupon_create", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "coupon_code" });
+  await render(ctx, "Send coupon code:");
+});
+bot.action("admin_help", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const r = await pool.query("SELECT * FROM help_items ORDER BY title");
+  await render(
+    ctx,
+    box(
+      "❓ HELP MANAGE",
+      r.rows.length
+        ? r.rows.map((x: any) => `• ${x.title}`).join("\n")
+        : "No help items.",
+    ),
+    Markup.inlineKeyboard([
+      [cb("➕ Add Help Button", "help_create")],
+      [cb("🔙 Back", "admin_home")],
+    ]),
+  );
+});
+bot.action("help_create", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  setState(ctx.from.id, { step: "help_title" });
+  await render(ctx, "Send help title:");
+});
+async function showPaymentSettings(ctx: any) {
+  const vals: any = {};
+  for (const k of [
+    "wallet_enabled",
+    "bep20_enabled",
+    "trc20_enabled",
+    "binance_enabled",
+  ]) {
+    const r = await pool.query("SELECT value FROM settings WHERE key=$1", [k]);
+    vals[k] = r.rows[0]?.value !== "false";
+  }
+  const api = await getSetting("binance_api_key"),
+    secret = await getSetting("binance_secret_key"),
+    merchant = await getSetting("binance_merchant_id"),
+    bsc = await getSetting("bsc_wallet"),
+    tron = await getSetting("tron_wallet"),
+    uid = await getSetting("binance_uid"),
+    scan = await getSetting("bscscan_api_key"),
+    tronKey = await getSetting("trongrid_api_key");
+  await render(
+    ctx,
+    box(
+      "💳 PAYMENT SETTINGS",
+      `🔑 Binance API: ${shown(api, true)}\n🔐 Secret Key: ${shown(secret, true)}\n🏦 Merchant ID: ${shown(merchant)}\n💼 BSC Wallet: ${shown(bsc)}\n💎 TRON Wallet: ${shown(tron)}\n🟡 Binance UID: ${shown(uid)}\n🔎 BSCScan API: ${shown(scan, true)}\n🌐 TRON API: ${shown(tronKey, true)}\n\nActive Methods:\n💰 Wallet: ${vals.wallet_enabled ? "✅ ON" : "❌ OFF"}\n💎 USDT BEP20: ${vals.bep20_enabled ? "✅ ON" : "❌ OFF"}\n💎 USDT TRC20: ${vals.trc20_enabled ? "✅ ON" : "❌ OFF"}\n⚡ Binance Pay: ${vals.binance_enabled ? "✅ ON" : "❌ OFF"}`,
+    ),
+    Markup.inlineKeyboard([
+      [
+        cb("🔑 Binance API Key", "edit_setting:binance_api_key:admin_payment"),
+        cb("🔐 Secret Key", "edit_setting:binance_secret_key:admin_payment"),
+      ],
+      [cb("🏦 Merchant ID", "edit_setting:binance_merchant_id:admin_payment")],
+      [cb("💼 BSC Wallet (BEP20)", "edit_setting:bsc_wallet:admin_payment")],
+      [cb("💎 TRON Wallet (TRC20)", "edit_setting:tron_wallet:admin_payment")],
+      [cb("🟡 Binance UID", "edit_setting:binance_uid:admin_payment")],
+      [
+        cb("🔎 BSCScan Key", "edit_setting:bscscan_api_key:admin_payment"),
+        cb("🌐 TRON API Key", "edit_setting:trongrid_api_key:admin_payment"),
+      ],
+      [
+        cb(
+          `💰 Wallet: ${vals.wallet_enabled ? "✅" : "❌"}`,
+          "pay:wallet_enabled",
+        ),
+        cb(
+          `💎 BEP20: ${vals.bep20_enabled ? "✅" : "❌"}`,
+          "pay:bep20_enabled",
+        ),
+      ],
+      [
+        cb(
+          `💎 TRC20: ${vals.trc20_enabled ? "✅" : "❌"}`,
+          "pay:trc20_enabled",
+        ),
+        cb(
+          `⚡ Pay: ${vals.binance_enabled ? "✅" : "❌"}`,
+          "pay:binance_enabled",
+        ),
+      ],
+      [cb("🧙 Run Setup Wizard", "payment_wizard")],
+      [cb("🔙 Back", "admin_home")],
+    ]),
+  );
+}
+async function showStoreSettings(ctx: any) {
+  const support = await getSetting("support_username"),
+    uid = await getSetting("binance_uid"),
+    name = await getSetting("binance_name"),
+    wallet = await getSetting("binance_wallet"),
+    bsc = await getSetting("bsc_wallet"),
+    tron = await getSetting("tron_wallet"),
+    scan = await getSetting("bscscan_api_key"),
+    ref = await getSetting("referral_bonus"),
+    reg = await getSetting("registration_bonus"),
+    maintenance = (await getSetting("maintenance_enabled")) === "true";
+  await render(
+    ctx,
+    box(
+      "⚙️ STORE SETTINGS",
+      `📞 Support: ${shown(support)}\n🟡 Binance UID: ${shown(uid)}\n👤 Binance Name: ${shown(name)}\n💼 Binance Wallet: ${shown(wallet)}\n💎 BSC Wallet: ${shown(bsc)}\n💎 TRON Wallet: ${shown(tron)}\n🔎 BSCScan API: ${shown(scan, true)}\n💰 Referral Bonus: $${Number(ref || 0).toFixed(2)}\n🎁 Registration Bonus: $${Number(reg || 0).toFixed(2)}\n🔧 Maintenance: ${maintenance ? "🔴 ON" : "🟢 OFF"}`,
+    ),
+    Markup.inlineKeyboard([
+      [
+        cb(
+          "📞 Support Username",
+          "edit_setting:support_username:admin_settings",
+        ),
+      ],
+      [
+        cb("🟡 Binance UID", "edit_setting:binance_uid:admin_settings"),
+        cb("👤 Binance Name", "edit_setting:binance_name:admin_settings"),
+      ],
+      [cb("💼 Binance Wallet", "edit_setting:binance_wallet:admin_settings")],
+      [cb("💎 BSC Wallet (BEP20)", "edit_setting:bsc_wallet:admin_settings")],
+      [cb("💎 TRON Wallet (TRC20)", "edit_setting:tron_wallet:admin_settings")],
+      [cb("🔎 BSCScan API Key", "edit_setting:bscscan_api_key:admin_settings")],
+      [
+        cb("💰 Referral Bonus", "edit_setting:referral_bonus:admin_settings"),
+        cb("🎁 Reg Bonus", "edit_setting:registration_bonus:admin_settings"),
+      ],
+      [
+        cb(
+          "📝 Maintenance Msg",
+          "edit_setting:maintenance_message:admin_settings",
+        ),
+      ],
+      [
+        cb(
+          maintenance ? "🟢 Disable Maintenance" : "🔴 Enable Maintenance",
+          "toggle_maintenance",
+        ),
+      ],
+      [cb("🔙 Back", "admin_home")],
+    ]),
+  );
+}
+bot.action("admin_payment", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await showPaymentSettings(ctx);
+});
+bot.action("admin_settings", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  await showStoreSettings(ctx);
+});
+bot.action(
+  /^edit_setting:([^:]+):(admin_payment|admin_settings)$/,
+  async (ctx) => {
+    if (!(await hasAdminAccess(ctx))) return;
+    await settingButton(
+      ctx,
+      ctx.match[1],
+      ctx.match[2] as "admin_payment" | "admin_settings",
+    );
+  },
+);
+bot.action(
+  /^pay:(wallet_enabled|bep20_enabled|trc20_enabled|binance_enabled)$/,
+  async (ctx) => {
+    if (!(await hasAdminAccess(ctx))) return;
+    await ctx.answerCbQuery("Updated ✅");
+    const k = ctx.match[1],
+      current = await getSetting(k);
+    await setSetting(k, current === "false" ? "true" : "false");
+    await showPaymentSettings(ctx);
+  },
+);
+bot.action("toggle_maintenance", async (ctx) => {
+  if (Number(ctx.from.id) !== config.adminId) return;
+  await ctx.answerCbQuery("Maintenance updated ✅");
+  await setSetting(
+    "maintenance_enabled",
+    (await getSetting("maintenance_enabled")) === "true" ? "false" : "true",
+  );
+  await showStoreSettings(ctx);
+});
+bot.action("payment_wizard", async (ctx) => {
+  if (Number(ctx.from.id) !== config.adminId) return;
+  await ctx.answerCbQuery();
+  await render(
+    ctx,
+    box(
+      "🧙 PAYMENT SETUP WIZARD",
+      "Set the items in this order:\n1. Binance UID\n2. Binance Name\n3. Binance API + Secret\n4. Merchant ID\n5. BSC/TRON wallets\n6. Enable the payment methods\n\nOpen any field below to configure it.",
+    ),
+    Markup.inlineKeyboard([
+      [
+        cb(
+          "🟡 Start with Binance UID",
+          "edit_setting:binance_uid:admin_payment",
+        ),
+      ],
+      [cb("🔙 Payment Settings", "admin_payment")],
+    ]),
+  );
+});
+bot.action("admin_dashboard", async (ctx) => {
+  if (!(await hasAdminAccess(ctx))) return;
+  await ctx.answerCbQuery();
+  const [u, p, o, s, st] = await Promise.all([
+    pool.query("SELECT COUNT(*)::int n FROM users"),
+    pool.query("SELECT COUNT(*)::int n FROM products"),
+    pool.query("SELECT COUNT(*)::int n FROM orders"),
+    pool.query(
+      "SELECT COALESCE(SUM(total),0) t FROM orders WHERE created_at::date=CURRENT_DATE",
+    ),
+    pool.query("SELECT COUNT(*)::int n FROM stock_items WHERE sold=FALSE"),
+  ]);
+  await render(
+    ctx,
+    box(
+      "📊 DASHBOARD",
+      `👥 Users: ${u.rows[0].n}\n📦 Products: ${p.rows[0].n}\n🧾 Orders: ${o.rows[0].n}\n💰 Sales Today: $${Number(s.rows[0].t).toFixed(2)}\n📊 Unsold Stock: ${st.rows[0].n}`,
+    ),
+  );
+});
 
-bot.on(message("text"),async ctx=>{await ensureUser(ctx.from.id,ctx.from.username,ctx.from.first_name);const uid=ctx.from.id,s=getState(uid),text=ctx.message.text.trim();if(!s)return;
-if(s.step==="buy_qty"){const q=Number(text);if(!Number.isInteger(q)||q<1)return void render(ctx,"❌ Invalid quantity.");const p=await getProduct(s.productId);if(!p)return void render(ctx,"❌ Product not found.");const available=await liveStock(p);if(available<q)return void render(ctx,"❌ Insufficient stock.");const total=Number(p.price)*q,u=await getUser(uid);setState(uid,{step:"checkout",productId:p.id,quantity:q,total});const rows:any[]=[[cb(`💰 Wallet ($${Number(u?.balance||0).toFixed(2)})${Number(u?.balance||0)>=total?" ✅":" — Insufficient"}`,"checkout_wallet")]];if((await getSetting("binance_enabled"))!=="false")rows.push([cb("🟡 Binance Pay","checkout_pay:binance")]);if((await getSetting("bep20_enabled"))!=="false")rows.push([cb("💎 USDT BEP20","checkout_pay:bep20")]);if((await getSetting("trc20_enabled"))!=="false")rows.push([cb("💎 USDT TRC20","checkout_pay:trc20")]);rows.push([cb("➕ Deposit Now","deposit")],[cb("❌ Cancel","shop")]);return void render(ctx,box("💳 SELECT PAYMENT METHOD",`📦 ${p.name}\n📦 Qty: ${q}\n💵 Total: $${total.toFixed(2)}\n\nChoose how to pay:`),Markup.inlineKeyboard(rows))}
-if(s.step==="deposit_amount"){const amount=Number(text);if(!Number.isFinite(amount)||amount<=0)return void render(ctx,"❌ Send a valid deposit amount greater than 0.");const receiver=s.method==="binance"?(await getSetting("binance_uid"))||(await getSetting("deposit_binance_uid")):s.method==="bep20"?await getSetting("bsc_wallet"):await getSetting("tron_wallet");const name=s.method==="binance"?(await getSetting("binance_name"))||(await getSetting("deposit_binance_name")):"STORE DN CAR";if(!receiver){clearState(uid);return void render(ctx,"❌ This payment method is temporarily unavailable.")}setState(uid,{step:"deposit_txid",amount,method:s.method});const label=s.method==="binance"?"BINANCE PAY":s.method==="bep20"?"USDT BEP20":"USDT TRC20";return void render(ctx,box(`💳 COMPLETE ${label} PAYMENT`,`Requested: $${amount.toFixed(2)}\nReceiver: ${receiver}\n${s.method==="binance"?`Name: ${name}\n`:""}\nSend payment, then send the transaction ID here.\n⏱ Only transactions from the last 1 hour are accepted.\n⚠️ Use the exact network and never send password/OTP.`),Markup.inlineKeyboard([[cb("🔙 Cancel","deposit")]]))}
-if(s.step==="deposit_txid"){if(text.length<4||text.length>160)return void render(ctx,"❌ Send a valid transaction ID.");const existing=await pool.query("SELECT status FROM deposits WHERE method=$1 AND LOWER(txid)=LOWER($2)",[s.method,text]);if(existing.rowCount){clearState(uid);return void render(ctx,box("♻️ TRANSACTION ALREADY USED",`This transaction ID is already ${existing.rows[0].status}.\nApproved, partial, or rejected IDs can never be used again.`),Markup.inlineKeyboard([[cb("💰 Wallet","wallet")]]))}const depositId=id8();try{await pool.query("INSERT INTO deposits(id,user_id,amount,method,txid,status) VALUES($1,$2,$3,$4,$5,'checking')",[depositId,uid,s.amount,s.method,text])}catch{clearState(uid);return void render(ctx,"❌ This transaction ID is already being checked or was used before.")}clearState(uid);const progress=await ctx.reply(box("🔍 VERIFYING PAYMENT","Progress: 1%\n\nChecking network, receiver, amount and duplicate status…"));for(const pct of [20,40,60,80]){await new Promise(r=>setTimeout(r,650));try{await ctx.telegram.editMessageText(ctx.chat.id,progress.message_id,undefined,box("🔍 VERIFYING PAYMENT",`Progress: ${pct}%\n\nChecking network, receiver, amount and duplicate status…`))}catch{}}let result=await verifyPayment(s.method,text,getSetting);if(result.state==="not_found"){await new Promise(r=>setTimeout(r,1800));result=await verifyPayment(s.method,text,getSetting)}try{await ctx.telegram.editMessageText(ctx.chat.id,progress.message_id,undefined,box("🔍 VERIFYING PAYMENT","Progress: 100%\n\nVerification complete."))}catch{}if(s.method==="binance"&&result.state==="api_error"){await pool.query("UPDATE deposits SET status='pending',received_amount=$1,verification_note=$2 WHERE id=$3",[s.amount,"Binance API unavailable; manual admin review required",depositId]);await ctx.reply(box("🟡 PAYMENT SENT FOR REVIEW",`Deposit ID: #${depositId}\nMethod: BINANCE PAY\nClaimed amount: $${s.amount.toFixed(2)}\n\nBinance API could not auto-read this transaction, so it has been sent to admin for manual verification. You will be notified after approval or rejection.`),Markup.inlineKeyboard([[cb("💰 Open Wallet","wallet")],[cb("🎧 Support","support")]]));const manualNotice=box("🟡 BINANCE PAYMENT — MANUAL REVIEW",`Deposit ID: #${depositId}\nUser: ${uid}\nUsername: @${ctx.from.username||"N/A"}\nClaimed amount: $${s.amount.toFixed(2)}\nTXID: ${text}\nReason: Binance API history access failed.\n\nVerify in Binance, then approve or reject. The TXID is already locked.`),manualButtons=Markup.inlineKeyboard([[cb("✅ Approve & Credit",`deposit_approve:${depositId}`),cb("❌ Reject & Lock",`deposit_reject:${depositId}`)]]);for(const adminId of await adminIds()){try{await bot.telegram.sendMessage(adminId,manualNotice,manualButtons)}catch{}}return}if(result.state!=="confirmed"){await pool.query("DELETE FROM deposits WHERE id=$1 AND status='checking'",[depositId]);return void ctx.reply(box("❌ PAYMENT NOT VERIFIED",`${result.message}\n\nPossible reasons:\n• Not received/confirmed yet\n• Wrong network or receiver\n• Transaction older than 1 hour\n• Invalid reference\n\nYou may recheck after fixing the issue.`),Markup.inlineKeyboard([[cb("🔄 Try Again","deposit")],[cb("🎧 Support","support")]]))}const received=Math.round(result.received*10000)/10000,requested=s.amount;if(received<=0){await pool.query("DELETE FROM deposits WHERE id=$1",[depositId]);return void ctx.reply("❌ Received amount could not be verified.")}if(received+0.0001<requested){const c=await pool.connect();try{await c.query("BEGIN");await c.query("UPDATE deposits SET status='partial',received_amount=$1,credited_amount=$1,verification_note='Verified partial payment' WHERE id=$2",[received,depositId]);await c.query("UPDATE users SET balance=balance+$1 WHERE id=$2",[received,uid]);await c.query("INSERT INTO balance_ledger(user_id,amount,reason) VALUES($1,$2,$3)",[uid,received,`${s.method.toUpperCase()} partial deposit #${depositId}`]);await c.query("COMMIT")}catch(e){await c.query("ROLLBACK");throw e}finally{c.release()}const remaining=Math.max(0,requested-received),u=await getUser(uid);await ctx.reply(box("⚠️ PARTIAL PAYMENT DETECTED",`Requested: $${requested.toFixed(2)}\nReceived: $${received.toFixed(2)}\nAdded to wallet: $${received.toFixed(2)}\nRemaining: $${remaining.toFixed(2)}\nNew balance: $${Number(u?.balance||0).toFixed(2)}\n\nTXID is now permanently locked.`),Markup.inlineKeyboard([[cb(`➕ Pay $${remaining.toFixed(2)} More`,`deposit_more:${s.method}:${remaining.toFixed(2)}`)],[cb("💰 Open Wallet","wallet")]]));for(const adminId of await adminIds()){try{await bot.telegram.sendMessage(adminId,box("⚠️ PARTIAL DEPOSIT AUTO-CREDITED",`ID: #${depositId}\nUser: ${uid}\nMethod: ${s.method.toUpperCase()}\nRequested: $${requested.toFixed(2)}\nReceived/Credited: $${received.toFixed(2)}\nRemaining: $${remaining.toFixed(2)}\nTXID: ${text}`))}catch{}}return}await pool.query("UPDATE deposits SET status='pending',received_amount=$1,verification_note='Payment verified; awaiting admin review' WHERE id=$2",[received,depositId]);await ctx.reply(box("✅ PAYMENT VERIFIED",`Deposit ID: #${depositId}\nMethod: ${s.method.toUpperCase()}\nRequested: $${requested.toFixed(2)}\nReceived: $${received.toFixed(2)}\n\nAdmin approval is pending. You will be notified instantly.`),Markup.inlineKeyboard([[cb("💰 Open Wallet","wallet")]]));const notice=box("✅ VERIFIED PAYMENT — REVIEW",`Deposit ID: #${depositId}\nUser: ${uid}\nUsername: @${ctx.from.username||"N/A"}\nMethod: ${s.method.toUpperCase()}\nRequested: $${requested.toFixed(2)}\nVerified received: $${received.toFixed(2)}\nTXID: ${text}\n\nApprove or reject below. Either action locks this TXID forever.`),buttons=Markup.inlineKeyboard([[cb("✅ Approve & Credit",`deposit_approve:${depositId}`),cb("❌ Reject & Lock",`deposit_reject:${depositId}`)]]);for(const adminId of await adminIds()){try{await bot.telegram.sendMessage(adminId,notice,buttons)}catch{}}return}
-if(!await hasAdminAccess(ctx))return;
-if(s.step==="setting_value"){if(uid!==config.adminId)return;let value=text;if(text.toUpperCase()==="OFF")value="";if(["referral_bonus","registration_bonus"].includes(s.key)){const n=Number(text);if(!Number.isFinite(n)||n<0)return void render(ctx,"❌ Send a valid bonus amount, for example: 0.10");value=String(n)}if(s.key==="support_username"&&value&&!value.startsWith("@"))value=`@${value}`;await setSetting(s.key,value);const back=s.back;clearState(uid);return void render(ctx,box("✅ SETTING SAVED",`${settingLabels[s.key]||s.key} updated successfully.`),Markup.inlineKeyboard([[cb("🔙 Back to Settings",back)]]))}
-if(s.step==="binance_uid"){if(uid!==config.adminId)return;if(!/^\d{4,30}$/.test(text))return void render(ctx,"❌ Send a valid numeric Binance UID.");await setSetting("deposit_binance_uid",text);clearState(uid);return void render(ctx,box("✅ BINANCE UID SAVED",`Deposit receiver UID: ${text}`),Markup.inlineKeyboard([[cb("💳 Payment Settings","admin_payment")]]))}
-if(s.step==="binance_name"){if(uid!==config.adminId)return;if(text.length<2||text.length>80)return void render(ctx,"❌ Send a valid receiver name.");await setSetting("deposit_binance_name",text);clearState(uid);return void render(ctx,box("✅ BINANCE NAME SAVED",`Receiver: ${text}`),Markup.inlineKeyboard([[cb("💳 Payment Settings","admin_payment")]]))}
-if(s.step==="admin_add"){if(uid!==config.adminId)return;const id=Number(text);if(!Number.isSafeInteger(id)||id<=0)return void render(ctx,"❌ Send a valid numeric Telegram User ID.");if(id===config.adminId){clearState(uid);return void render(ctx,"👑 That ID is already the main owner.")}await pool.query("INSERT INTO admins(id,added_by) VALUES($1,$2) ON CONFLICT(id) DO NOTHING",[id,uid]);clearState(uid);return void render(ctx,box("✅ NEW ADMIN ADDED",`User ${id} is now part of the boss squad 😎`),Markup.inlineKeyboard([[cb("👑 Admin Management","admin_manage")]]))}
-if(s.step==="admin_remove"){if(uid!==config.adminId)return;const id=Number(text);if(!Number.isSafeInteger(id)||id<=0)return void render(ctx,"❌ Send a valid numeric Telegram User ID.");if(id===config.adminId){clearState(uid);return void render(ctx,"❌ Main owner cannot be removed.")}const removed=await pool.query("DELETE FROM admins WHERE id=$1 RETURNING id",[id]);clearState(uid);return void render(ctx,box(removed.rowCount?"✅ ADMIN REMOVED":"ℹ️ ADMIN NOT FOUND",removed.rowCount?`User ${id} no longer has admin access.`:`User ${id} was not in the admin list.`),Markup.inlineKeyboard([[cb("👑 Admin Management","admin_manage")]]))}
-if(s.step==="product_location"){const position=Number(text),ps=await getProducts();if(!Number.isInteger(position)||position<1||position>ps.length)return void render(ctx,`❌ Send a number from 1 to ${ps.length}.`);const selected=ps.find((p:any)=>p.id===s.productId);if(!selected){clearState(uid);return void render(ctx,"❌ Product not found.")}const ordered=ps.filter((p:any)=>p.id!==s.productId);ordered.splice(position-1,0,selected);const c=await pool.connect();try{await c.query("BEGIN");for(let i=0;i<ordered.length;i++)await c.query("UPDATE products SET sort_order=$1 WHERE id=$2",[i+1,ordered[i].id]);await c.query("COMMIT")}catch(e){await c.query("ROLLBACK");throw e}finally{c.release()}clearState(uid);return void render(ctx,box("✅ PRODUCT MOVED",`${selected.name}\nNew shop position: ${position}`),Markup.inlineKeyboard([[cb("🔢 Product Location","admin_product_location")],[cb("🛍 View Shop","shop")]]))}
-if(s.step==="add_product_name"){setState(uid,{step:"add_product_price",name:text});return void render(ctx,"Send price:")}if(s.step==="add_product_price"){const p=Number(text);if(!Number.isFinite(p)||p<0)return void render(ctx,"❌ Invalid price.");setState(uid,{step:"add_product_warranty",name:s.name,price:p});return void render(ctx,"Send warranty:")}if(s.step==="add_product_warranty"){setState(uid,{step:"add_product_desc",name:s.name,price:s.price,warranty:text});return void render(ctx,"Send description:")}if(s.step==="add_product_desc"){const id=id8();await pool.query("INSERT INTO products(id,name,price,warranty,description) VALUES($1,$2,$3,$4,$5)",[id,s.name,s.price,s.warranty,text]);clearState(uid);return void render(ctx,`✅ Tool created.\nID: ${id}`)}if(s.step==="field"){const v=s.numeric?Number(text):text;if(s.numeric&&(!Number.isFinite(v)||Number(v)<0))return void render(ctx,"❌ Invalid number.");await pool.query(`UPDATE products SET ${s.field}=$1 WHERE id=$2`,[v,s.productId]);clearState(uid);return void render(ctx,"✅ Updated.")}
-if(s.step==="add_stock"){const items=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);let a=0,d=0;for(const x of items){const r=await pool.query("INSERT INTO stock_items(product_id,value) VALUES($1,$2) ON CONFLICT(product_id,value) DO NOTHING RETURNING id",[s.productId,x]);r.rowCount?a++:d++}clearState(uid);return void render(ctx,`✅ STOCK IMPORT COMPLETE\n\n📥 Received: ${items.length}\n✅ Added: ${a}\n♻️ Duplicates: ${d}\n📦 Total Stock: ${await stockCount(s.productId)}`)}
-if(s.step==="remove_stock"){const q=Number(text);if(!Number.isInteger(q)||q<1)return void render(ctx,"❌ Invalid quantity.");const p=await getProduct(s.productId),r=await pool.query("SELECT * FROM stock_items WHERE product_id=$1 AND sold=FALSE ORDER BY id LIMIT $2",[s.productId,q]);if(!r.rows.length){clearState(uid);return void render(ctx,"No unsold stock.")}await pool.query("DELETE FROM stock_items WHERE id=ANY($1::bigint[])",[r.rows.map((x:any)=>x.id)]);const body=`STORE DN CAR\nREMOVED STOCK BACKUP\n\nProduct:\n${p?.name||s.productId}\n\nRemoved:\n${r.rows.length}\n\nDate:\n${new Date().toISOString()}\n\n--------------------------------\n\n${r.rows.map((x:any,i:number)=>`${i+1}. ${x.value}`).join("\n")}`;clearState(uid);await ctx.replyWithDocument({source:Buffer.from(body),filename:`removed_${(p?.name||"stock").replace(/[^a-z0-9]+/gi,"_")}_${Date.now()}.txt`});return}
-if(s.step==="balance_user"){const id=Number(text);if(!Number.isInteger(id))return void render(ctx,"❌ Invalid user ID.");const u=await getUser(id);if(!u)return void render(ctx,"❌ User not found.");if(s.action==="check"){clearState(uid);const o=(await pool.query("SELECT COUNT(*)::int n,COALESCE(SUM(total),0) t FROM orders WHERE user_id=$1",[id])).rows[0];return void render(ctx,box("💰 BALANCE CHECK",`🆔 User ID: ${id}\n💰 Current Balance: $${Number(u.balance).toFixed(2)}\n📦 Total Orders: ${o.n}\n💸 Total Spent: $${Number(o.t).toFixed(2)}`))}setState(uid,{step:"balance_amount",action:s.action,userId:id});return void render(ctx,"Send amount:")}
-if(s.step==="balance_amount"){const a=Number(text);if(!Number.isFinite(a)||a<=0)return void render(ctx,"❌ Invalid amount.");const u=await getUser(s.userId);if(s.action==="remove"&&Number(u.balance)<a)return void render(ctx,"❌ Insufficient user balance.");const v=s.action==="add"?a:-a;await pool.query("UPDATE users SET balance=balance+$1 WHERE id=$2",[v,s.userId]);await pool.query("INSERT INTO balance_ledger(user_id,amount,reason,admin_id) VALUES($1,$2,$3,$4)",[s.userId,v,`Admin ${s.action} balance`,config.adminId]);clearState(uid);return void render(ctx,"✅ Balance updated.")}
-if(s.step==="track_order"){const id=text.replace(/^#/,"").toUpperCase(),r=await pool.query("SELECT * FROM orders WHERE id=$1",[id]);clearState(uid);if(!r.rows[0])return void render(ctx,"❌ Order not found.");const o=r.rows[0];await render(ctx,box("🔎 ORDER DETAILS",`🆔 Order: #${o.id}\n🆔 User ID: ${o.user_id}\n📦 Product: ${o.product_name}\n🔢 Quantity: ${o.quantity}\n💰 Unit Price: $${Number(o.unit_price).toFixed(2)}\n💵 Total: $${Number(o.total).toFixed(2)}\n✅ Status: ${o.status}\n📅 Date: ${o.created_at}`));for(const c of String(o.delivery||"").match(/[\s\S]{1,3000}/g)||[])await render(ctx,`📦 Delivery Data\n\n${c}`);return}
-if(s.step==="broadcast"){clearState(uid);const us=await pool.query("SELECT id FROM users");let ok=0,bad=0;for(const u of us.rows){try{await bot.telegram.sendMessage(u.id,text);ok++}catch{bad++}}return void render(ctx,`📢 BROADCAST COMPLETE\n\nSent: ${ok}\nFailed: ${bad}\nTotal: ${us.rows.length}`)}if(s.step==="coupon_code"){setState(uid,{step:"coupon_percent",code:text.toUpperCase()});return void render(ctx,"Send discount percent:")}if(s.step==="coupon_percent"){const p=Number(text);if(!Number.isFinite(p)||p<=0||p>100)return void render(ctx,"❌ Invalid percent.");await pool.query("INSERT INTO coupons(code,percent) VALUES($1,$2) ON CONFLICT(code) DO UPDATE SET percent=EXCLUDED.percent,active=TRUE",[s.code,p]);clearState(uid);return void render(ctx,"✅ Coupon saved.")}if(s.step==="help_title"){setState(uid,{step:"help_content",id:id8(),title:text});return void render(ctx,"Send help content:")}if(s.step==="help_content"){await pool.query("INSERT INTO help_items(id,title,content) VALUES($1,$2,$3)",[s.id,s.title,text]);clearState(uid);return void render(ctx,"✅ Help item added.")}});
-bot.catch(err=>console.error(err));await initDb();void eliteProducts().catch(()=>{});await bot.launch();console.log("STORE DN CAR bot started");process.once("SIGINT",()=>bot.stop("SIGINT"));process.once("SIGTERM",()=>bot.stop("SIGTERM"));
+bot.on(message("text"), async (ctx) => {
+  await ensureUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
+  const uid = ctx.from.id,
+    s = getState(uid),
+    text = ctx.message.text.trim();
+  if (!s) return;
+  if (s.step === "buy_qty") {
+    const q = Number(text);
+    if (!Number.isInteger(q) || q < 1)
+      return void render(ctx, "❌ Invalid quantity.");
+    const p = await getProduct(s.productId);
+    if (!p) return void render(ctx, "❌ Product not found.");
+    const available = await liveStock(p);
+    if (available < q) return void render(ctx, "❌ Insufficient stock.");
+    const total = Number(p.price) * q,
+      u = await getUser(uid);
+    setState(uid, { step: "checkout", productId: p.id, quantity: q, total });
+    const rows: any[] = [
+      [
+        cb(
+          `💰 Wallet ($${Number(u?.balance || 0).toFixed(2)})${Number(u?.balance || 0) >= total ? " ✅" : " — Insufficient"}`,
+          "checkout_wallet",
+        ),
+      ],
+    ];
+    if ((await getSetting("binance_enabled")) !== "false")
+      rows.push([cb("🟡 Binance Pay", "checkout_pay:binance")]);
+    if ((await getSetting("bep20_enabled")) !== "false")
+      rows.push([cb("💎 USDT BEP20", "checkout_pay:bep20")]);
+    if ((await getSetting("trc20_enabled")) !== "false")
+      rows.push([cb("💎 USDT TRC20", "checkout_pay:trc20")]);
+    rows.push([cb("➕ Deposit Now", "deposit")], [cb("❌ Cancel", "shop")]);
+    return void render(
+      ctx,
+      box(
+        "💳 SELECT PAYMENT METHOD",
+        `📦 ${p.name}\n📦 Qty: ${q}\n💵 Total: $${total.toFixed(2)}\n\nChoose how to pay:`,
+      ),
+      Markup.inlineKeyboard(rows),
+    );
+  }
+  if (s.step === "deposit_amount") {
+    const amount = Number(text);
+    if (!Number.isFinite(amount) || amount <= 0)
+      return void render(ctx, "❌ Send a valid deposit amount greater than 0.");
+    const receiver =
+      s.method === "binance"
+        ? (await getSetting("binance_uid")) ||
+          (await getSetting("deposit_binance_uid"))
+        : s.method === "bep20"
+          ? await getSetting("bsc_wallet")
+          : await getSetting("tron_wallet");
+    const name =
+      s.method === "binance"
+        ? (await getSetting("binance_name")) ||
+          (await getSetting("deposit_binance_name"))
+        : "STORE DN CAR";
+    if (!receiver) {
+      clearState(uid);
+      return void render(
+        ctx,
+        "❌ This payment method is temporarily unavailable.",
+      );
+    }
+    setState(uid, { step: "deposit_txid", amount, method: s.method });
+    const label =
+      s.method === "binance"
+        ? "BINANCE PAY"
+        : s.method === "bep20"
+          ? "USDT BEP20"
+          : "USDT TRC20";
+    return void render(
+      ctx,
+      box(
+        `💳 COMPLETE ${label} PAYMENT`,
+        `Requested: $${amount.toFixed(2)}\nReceiver: ${receiver}\n${s.method === "binance" ? `Name: ${name}\n` : ""}\nSend payment, then send the transaction ID here.\n⏱ Only transactions from the last 1 hour are accepted.\n⚠️ Use the exact network and never send password/OTP.`,
+      ),
+      Markup.inlineKeyboard([[cb("🔙 Cancel", "deposit")]]),
+    );
+  }
+  if (s.step === "deposit_txid") {
+    if (text.length < 4 || text.length > 160)
+      return void render(ctx, "❌ Send a valid transaction ID.");
+    const existing = await pool.query(
+      "SELECT status FROM deposits WHERE method=$1 AND LOWER(txid)=LOWER($2)",
+      [s.method, text],
+    );
+    if (existing.rowCount) {
+      clearState(uid);
+      return void render(
+        ctx,
+        box(
+          "♻️ TRANSACTION ALREADY USED",
+          `This transaction ID is already ${existing.rows[0].status}.\nApproved, partial, or rejected IDs can never be used again.`,
+        ),
+        Markup.inlineKeyboard([[cb("💰 Wallet", "wallet")]]),
+      );
+    }
+    const depositId = id8();
+    try {
+      await pool.query(
+        "INSERT INTO deposits(id,user_id,amount,method,txid,status) VALUES($1,$2,$3,$4,$5,'checking')",
+        [depositId, uid, s.amount, s.method, text],
+      );
+    } catch {
+      clearState(uid);
+      return void render(
+        ctx,
+        "❌ This transaction ID is already being checked or was used before.",
+      );
+    }
+    clearState(uid);
+    const progress = await ctx.reply(
+      box(
+        "🔍 VERIFYING PAYMENT",
+        "Progress: 1%\n\nChecking network, receiver, amount and duplicate status…",
+      ),
+    );
+    for (const pct of [20, 40, 60, 80]) {
+      await new Promise((r) => setTimeout(r, 650));
+      try {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          progress.message_id,
+          undefined,
+          box(
+            "🔍 VERIFYING PAYMENT",
+            `Progress: ${pct}%\n\nChecking network, receiver, amount and duplicate status…`,
+          ),
+        );
+      } catch {}
+    }
+    let result = await verifyPayment(s.method, text, getSetting);
+    if (result.state === "not_found") {
+      await new Promise((r) => setTimeout(r, 1800));
+      result = await verifyPayment(s.method, text, getSetting);
+    }
+    try {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        progress.message_id,
+        undefined,
+        box("🔍 VERIFYING PAYMENT", "Progress: 100%\n\nVerification complete."),
+      );
+    } catch {}
+    if (s.method === "binance" && result.state === "api_error") {
+      const verificationIssue = result.message || "Unknown Binance verification error";
+      await pool.query(
+        "UPDATE deposits SET status='pending',received_amount=$1,verification_note=$2 WHERE id=$3",
+        [
+          s.amount,
+          `Manual Binance review required: ${verificationIssue}`.slice(0, 300),
+          depositId,
+        ],
+      );
+      await ctx.reply(
+        box(
+          "🟡 PAYMENT SENT FOR REVIEW",
+          `Deposit ID: #${depositId}\nMethod: BINANCE PAY\nClaimed amount: $${s.amount.toFixed(2)}\nIssue: ${verificationIssue}\n\nAutomatic verification could not confirm this transaction. It has been sent to admin for manual verification. You will be notified after approval or rejection.`,
+        ),
+        Markup.inlineKeyboard([
+          [cb("💰 Open Wallet", "wallet")],
+          [cb("🎧 Support", "support")],
+        ]),
+      );
+      const manualNotice = box(
+          "🟡 BINANCE PAYMENT — MANUAL REVIEW",
+          `Deposit ID: #${depositId}\nUser: ${uid}\nUsername: @${ctx.from.username || "N/A"}\nClaimed amount: $${s.amount.toFixed(2)}\nTXID: ${text}\nIssue: ${verificationIssue}\n\nVerify the transaction, receiver and amount in Binance, then approve or reject. The TXID is already locked.`,
+        ),
+        manualButtons = Markup.inlineKeyboard([
+          [
+            cb("✅ Approve & Credit", `deposit_approve:${depositId}`),
+            cb("❌ Reject & Lock", `deposit_reject:${depositId}`),
+          ],
+        ]);
+      for (const adminId of await adminIds()) {
+        try {
+          await bot.telegram.sendMessage(adminId, manualNotice, manualButtons);
+        } catch {}
+      }
+      return;
+    }
+    if (result.state !== "confirmed") {
+      await pool.query(
+        "DELETE FROM deposits WHERE id=$1 AND status='checking'",
+        [depositId],
+      );
+      return void ctx.reply(
+        box(
+          "❌ PAYMENT NOT VERIFIED",
+          `${result.message}\n\nPossible reasons:\n• Not received/confirmed yet\n• Wrong network or receiver\n• Transaction older than 1 hour\n• Invalid reference\n\nYou may recheck after fixing the issue.`,
+        ),
+        Markup.inlineKeyboard([
+          [cb("🔄 Try Again", "deposit")],
+          [cb("🎧 Support", "support")],
+        ]),
+      );
+    }
+    const received = Math.round(result.received * 10000) / 10000,
+      requested = s.amount;
+    if (received <= 0) {
+      await pool.query("DELETE FROM deposits WHERE id=$1", [depositId]);
+      return void ctx.reply("❌ Received amount could not be verified.");
+    }
+    if (received + 0.0001 < requested) {
+      const c = await pool.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query(
+          "UPDATE deposits SET status='partial',received_amount=$1,credited_amount=$1,verification_note='Verified partial payment' WHERE id=$2",
+          [received, depositId],
+        );
+        await c.query("UPDATE users SET balance=balance+$1 WHERE id=$2", [
+          received,
+          uid,
+        ]);
+        await c.query(
+          "INSERT INTO balance_ledger(user_id,amount,reason) VALUES($1,$2,$3)",
+          [
+            uid,
+            received,
+            `${s.method.toUpperCase()} partial deposit #${depositId}`,
+          ],
+        );
+        await c.query("COMMIT");
+      } catch (e) {
+        await c.query("ROLLBACK");
+        throw e;
+      } finally {
+        c.release();
+      }
+      const remaining = Math.max(0, requested - received),
+        u = await getUser(uid);
+      await ctx.reply(
+        box(
+          "⚠️ PARTIAL PAYMENT DETECTED",
+          `Requested: $${requested.toFixed(2)}\nReceived: $${received.toFixed(2)}\nAdded to wallet: $${received.toFixed(2)}\nRemaining: $${remaining.toFixed(2)}\nNew balance: $${Number(u?.balance || 0).toFixed(2)}\n\nTXID is now permanently locked.`,
+        ),
+        Markup.inlineKeyboard([
+          [
+            cb(
+              `➕ Pay $${remaining.toFixed(2)} More`,
+              `deposit_more:${s.method}:${remaining.toFixed(2)}`,
+            ),
+          ],
+          [cb("💰 Open Wallet", "wallet")],
+        ]),
+      );
+      for (const adminId of await adminIds()) {
+        try {
+          await bot.telegram.sendMessage(
+            adminId,
+            box(
+              "⚠️ PARTIAL DEPOSIT AUTO-CREDITED",
+              `ID: #${depositId}\nUser: ${uid}\nMethod: ${s.method.toUpperCase()}\nRequested: $${requested.toFixed(2)}\nReceived/Credited: $${received.toFixed(2)}\nRemaining: $${remaining.toFixed(2)}\nTXID: ${text}`,
+            ),
+          );
+        } catch {}
+      }
+      return;
+    }
+    await pool.query(
+      "UPDATE deposits SET status='pending',received_amount=$1,verification_note='Payment verified; awaiting admin review' WHERE id=$2",
+      [received, depositId],
+    );
+    await ctx.reply(
+      box(
+        "✅ PAYMENT VERIFIED",
+        `Deposit ID: #${depositId}\nMethod: ${s.method.toUpperCase()}\nRequested: $${requested.toFixed(2)}\nReceived: $${received.toFixed(2)}\n\nAdmin approval is pending. You will be notified instantly.`,
+      ),
+      Markup.inlineKeyboard([[cb("💰 Open Wallet", "wallet")]]),
+    );
+    const notice = box(
+        "✅ VERIFIED PAYMENT — REVIEW",
+        `Deposit ID: #${depositId}\nUser: ${uid}\nUsername: @${ctx.from.username || "N/A"}\nMethod: ${s.method.toUpperCase()}\nRequested: $${requested.toFixed(2)}\nVerified received: $${received.toFixed(2)}\nTXID: ${text}\n\nApprove or reject below. Either action locks this TXID forever.`,
+      ),
+      buttons = Markup.inlineKeyboard([
+        [
+          cb("✅ Approve & Credit", `deposit_approve:${depositId}`),
+          cb("❌ Reject & Lock", `deposit_reject:${depositId}`),
+        ],
+      ]);
+    for (const adminId of await adminIds()) {
+      try {
+        await bot.telegram.sendMessage(adminId, notice, buttons);
+      } catch {}
+    }
+    return;
+  }
+  if (!(await hasAdminAccess(ctx))) return;
+  if (s.step === "setting_value") {
+    if (uid !== config.adminId) return;
+    let value = text;
+    if (text.toUpperCase() === "OFF") value = "";
+    if (["referral_bonus", "registration_bonus"].includes(s.key)) {
+      const n = Number(text);
+      if (!Number.isFinite(n) || n < 0)
+        return void render(
+          ctx,
+          "❌ Send a valid bonus amount, for example: 0.10",
+        );
+      value = String(n);
+    }
+    if (s.key === "support_username" && value && !value.startsWith("@"))
+      value = `@${value}`;
+    await setSetting(s.key, value);
+    const back = s.back;
+    clearState(uid);
+    return void render(
+      ctx,
+      box(
+        "✅ SETTING SAVED",
+        `${settingLabels[s.key] || s.key} updated successfully.`,
+      ),
+      Markup.inlineKeyboard([[cb("🔙 Back to Settings", back)]]),
+    );
+  }
+  if (s.step === "binance_uid") {
+    if (uid !== config.adminId) return;
+    if (!/^\d{4,30}$/.test(text))
+      return void render(ctx, "❌ Send a valid numeric Binance UID.");
+    await setSetting("deposit_binance_uid", text);
+    clearState(uid);
+    return void render(
+      ctx,
+      box("✅ BINANCE UID SAVED", `Deposit receiver UID: ${text}`),
+      Markup.inlineKeyboard([[cb("💳 Payment Settings", "admin_payment")]]),
+    );
+  }
+  if (s.step === "binance_name") {
+    if (uid !== config.adminId) return;
+    if (text.length < 2 || text.length > 80)
+      return void render(ctx, "❌ Send a valid receiver name.");
+    await setSetting("deposit_binance_name", text);
+    clearState(uid);
+    return void render(
+      ctx,
+      box("✅ BINANCE NAME SAVED", `Receiver: ${text}`),
+      Markup.inlineKeyboard([[cb("💳 Payment Settings", "admin_payment")]]),
+    );
+  }
+  if (s.step === "admin_add") {
+    if (uid !== config.adminId) return;
+    const id = Number(text);
+    if (!Number.isSafeInteger(id) || id <= 0)
+      return void render(ctx, "❌ Send a valid numeric Telegram User ID.");
+    if (id === config.adminId) {
+      clearState(uid);
+      return void render(ctx, "👑 That ID is already the main owner.");
+    }
+    await pool.query(
+      "INSERT INTO admins(id,added_by) VALUES($1,$2) ON CONFLICT(id) DO NOTHING",
+      [id, uid],
+    );
+    clearState(uid);
+    return void render(
+      ctx,
+      box("✅ NEW ADMIN ADDED", `User ${id} is now part of the boss squad 😎`),
+      Markup.inlineKeyboard([[cb("👑 Admin Management", "admin_manage")]]),
+    );
+  }
+  if (s.step === "admin_remove") {
+    if (uid !== config.adminId) return;
+    const id = Number(text);
+    if (!Number.isSafeInteger(id) || id <= 0)
+      return void render(ctx, "❌ Send a valid numeric Telegram User ID.");
+    if (id === config.adminId) {
+      clearState(uid);
+      return void render(ctx, "❌ Main owner cannot be removed.");
+    }
+    const removed = await pool.query(
+      "DELETE FROM admins WHERE id=$1 RETURNING id",
+      [id],
+    );
+    clearState(uid);
+    return void render(
+      ctx,
+      box(
+        removed.rowCount ? "✅ ADMIN REMOVED" : "ℹ️ ADMIN NOT FOUND",
+        removed.rowCount
+          ? `User ${id} no longer has admin access.`
+          : `User ${id} was not in the admin list.`,
+      ),
+      Markup.inlineKeyboard([[cb("👑 Admin Management", "admin_manage")]]),
+    );
+  }
+  if (s.step === "product_location") {
+    const position = Number(text),
+      ps = await getProducts();
+    if (!Number.isInteger(position) || position < 1 || position > ps.length)
+      return void render(ctx, `❌ Send a number from 1 to ${ps.length}.`);
+    const selected = ps.find((p: any) => p.id === s.productId);
+    if (!selected) {
+      clearState(uid);
+      return void render(ctx, "❌ Product not found.");
+    }
+    const ordered = ps.filter((p: any) => p.id !== s.productId);
+    ordered.splice(position - 1, 0, selected);
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      for (let i = 0; i < ordered.length; i++)
+        await c.query("UPDATE products SET sort_order=$1 WHERE id=$2", [
+          i + 1,
+          ordered[i].id,
+        ]);
+      await c.query("COMMIT");
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    } finally {
+      c.release();
+    }
+    clearState(uid);
+    return void render(
+      ctx,
+      box(
+        "✅ PRODUCT MOVED",
+        `${selected.name}\nNew shop position: ${position}`,
+      ),
+      Markup.inlineKeyboard([
+        [cb("🔢 Product Location", "admin_product_location")],
+        [cb("🛍 View Shop", "shop")],
+      ]),
+    );
+  }
+  if (s.step === "add_product_name") {
+    setState(uid, { step: "add_product_price", name: text });
+    return void render(ctx, "Send price:");
+  }
+  if (s.step === "add_product_price") {
+    const p = Number(text);
+    if (!Number.isFinite(p) || p < 0)
+      return void render(ctx, "❌ Invalid price.");
+    setState(uid, { step: "add_product_warranty", name: s.name, price: p });
+    return void render(ctx, "Send warranty:");
+  }
+  if (s.step === "add_product_warranty") {
+    setState(uid, {
+      step: "add_product_desc",
+      name: s.name,
+      price: s.price,
+      warranty: text,
+    });
+    return void render(ctx, "Send description:");
+  }
+  if (s.step === "add_product_desc") {
+    const id = id8();
+    await pool.query(
+      "INSERT INTO products(id,name,price,warranty,description) VALUES($1,$2,$3,$4,$5)",
+      [id, s.name, s.price, s.warranty, text],
+    );
+    clearState(uid);
+    return void render(ctx, `✅ Tool created.\nID: ${id}`);
+  }
+  if (s.step === "field") {
+    const v = s.numeric ? Number(text) : text;
+    if (s.numeric && (!Number.isFinite(v) || Number(v) < 0))
+      return void render(ctx, "❌ Invalid number.");
+    await pool.query(`UPDATE products SET ${s.field}=$1 WHERE id=$2`, [
+      v,
+      s.productId,
+    ]);
+    clearState(uid);
+    return void render(ctx, "✅ Updated.");
+  }
+  if (s.step === "add_stock") {
+    const items = text
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+    let a = 0,
+      d = 0;
+    for (const x of items) {
+      const r = await pool.query(
+        "INSERT INTO stock_items(product_id,value) VALUES($1,$2) ON CONFLICT(product_id,value) DO NOTHING RETURNING id",
+        [s.productId, x],
+      );
+      r.rowCount ? a++ : d++;
+    }
+    clearState(uid);
+    return void render(
+      ctx,
+      `✅ STOCK IMPORT COMPLETE\n\n📥 Received: ${items.length}\n✅ Added: ${a}\n♻️ Duplicates: ${d}\n📦 Total Stock: ${await stockCount(s.productId)}`,
+    );
+  }
+  if (s.step === "remove_stock") {
+    const q = Number(text);
+    if (!Number.isInteger(q) || q < 1)
+      return void render(ctx, "❌ Invalid quantity.");
+    const p = await getProduct(s.productId),
+      r = await pool.query(
+        "SELECT * FROM stock_items WHERE product_id=$1 AND sold=FALSE ORDER BY id LIMIT $2",
+        [s.productId, q],
+      );
+    if (!r.rows.length) {
+      clearState(uid);
+      return void render(ctx, "No unsold stock.");
+    }
+    await pool.query("DELETE FROM stock_items WHERE id=ANY($1::bigint[])", [
+      r.rows.map((x: any) => x.id),
+    ]);
+    const body = `STORE DN CAR\nREMOVED STOCK BACKUP\n\nProduct:\n${p?.name || s.productId}\n\nRemoved:\n${r.rows.length}\n\nDate:\n${new Date().toISOString()}\n\n--------------------------------\n\n${r.rows.map((x: any, i: number) => `${i + 1}. ${x.value}`).join("\n")}`;
+    clearState(uid);
+    await ctx.replyWithDocument({
+      source: Buffer.from(body),
+      filename: `removed_${(p?.name || "stock").replace(/[^a-z0-9]+/gi, "_")}_${Date.now()}.txt`,
+    });
+    return;
+  }
+  if (s.step === "balance_user") {
+    const id = Number(text);
+    if (!Number.isInteger(id)) return void render(ctx, "❌ Invalid user ID.");
+    const u = await getUser(id);
+    if (!u) return void render(ctx, "❌ User not found.");
+    if (s.action === "check") {
+      clearState(uid);
+      const o = (
+        await pool.query(
+          "SELECT COUNT(*)::int n,COALESCE(SUM(total),0) t FROM orders WHERE user_id=$1",
+          [id],
+        )
+      ).rows[0];
+      return void render(
+        ctx,
+        box(
+          "💰 BALANCE CHECK",
+          `🆔 User ID: ${id}\n💰 Current Balance: $${Number(u.balance).toFixed(2)}\n📦 Total Orders: ${o.n}\n💸 Total Spent: $${Number(o.t).toFixed(2)}`,
+        ),
+      );
+    }
+    setState(uid, { step: "balance_amount", action: s.action, userId: id });
+    return void render(ctx, "Send amount:");
+  }
+  if (s.step === "balance_amount") {
+    const a = Number(text);
+    if (!Number.isFinite(a) || a <= 0)
+      return void render(ctx, "❌ Invalid amount.");
+    const u = await getUser(s.userId);
+    if (s.action === "remove" && Number(u.balance) < a)
+      return void render(ctx, "❌ Insufficient user balance.");
+    const v = s.action === "add" ? a : -a;
+    await pool.query("UPDATE users SET balance=balance+$1 WHERE id=$2", [
+      v,
+      s.userId,
+    ]);
+    await pool.query(
+      "INSERT INTO balance_ledger(user_id,amount,reason,admin_id) VALUES($1,$2,$3,$4)",
+      [s.userId, v, `Admin ${s.action} balance`, config.adminId],
+    );
+    clearState(uid);
+    return void render(ctx, "✅ Balance updated.");
+  }
+  if (s.step === "track_order") {
+    const id = text.replace(/^#/, "").toUpperCase(),
+      r = await pool.query("SELECT * FROM orders WHERE id=$1", [id]);
+    clearState(uid);
+    if (!r.rows[0]) return void render(ctx, "❌ Order not found.");
+    const o = r.rows[0];
+    await render(
+      ctx,
+      box(
+        "🔎 ORDER DETAILS",
+        `🆔 Order: #${o.id}\n🆔 User ID: ${o.user_id}\n📦 Product: ${o.product_name}\n🔢 Quantity: ${o.quantity}\n💰 Unit Price: $${Number(o.unit_price).toFixed(2)}\n💵 Total: $${Number(o.total).toFixed(2)}\n✅ Status: ${o.status}\n📅 Date: ${o.created_at}`,
+      ),
+    );
+    for (const c of String(o.delivery || "").match(/[\s\S]{1,3000}/g) || [])
+      await render(ctx, `📦 Delivery Data\n\n${c}`);
+    return;
+  }
+  if (s.step === "broadcast") {
+    clearState(uid);
+    const us = await pool.query("SELECT id FROM users");
+    let ok = 0,
+      bad = 0;
+    for (const u of us.rows) {
+      try {
+        await bot.telegram.sendMessage(u.id, text);
+        ok++;
+      } catch {
+        bad++;
+      }
+    }
+    return void render(
+      ctx,
+      `📢 BROADCAST COMPLETE\n\nSent: ${ok}\nFailed: ${bad}\nTotal: ${us.rows.length}`,
+    );
+  }
+  if (s.step === "coupon_code") {
+    setState(uid, { step: "coupon_percent", code: text.toUpperCase() });
+    return void render(ctx, "Send discount percent:");
+  }
+  if (s.step === "coupon_percent") {
+    const p = Number(text);
+    if (!Number.isFinite(p) || p <= 0 || p > 100)
+      return void render(ctx, "❌ Invalid percent.");
+    await pool.query(
+      "INSERT INTO coupons(code,percent) VALUES($1,$2) ON CONFLICT(code) DO UPDATE SET percent=EXCLUDED.percent,active=TRUE",
+      [s.code, p],
+    );
+    clearState(uid);
+    return void render(ctx, "✅ Coupon saved.");
+  }
+  if (s.step === "help_title") {
+    setState(uid, { step: "help_content", id: id8(), title: text });
+    return void render(ctx, "Send help content:");
+  }
+  if (s.step === "help_content") {
+    await pool.query(
+      "INSERT INTO help_items(id,title,content) VALUES($1,$2,$3)",
+      [s.id, s.title, text],
+    );
+    clearState(uid);
+    return void render(ctx, "✅ Help item added.");
+  }
+});
+bot.catch((err) => console.error(err));
+await initDb();
+void eliteProducts().catch(() => {});
+await bot.launch();
+console.log("STORE DN CAR bot started");
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
