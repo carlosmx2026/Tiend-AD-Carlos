@@ -140,7 +140,7 @@ async function liveStock(p: any) {
 }
 async function shop(
   ctx: any,
-  page = 1,
+  _page = 1,
   filter: "all" | "available" | "out" = "all",
 ) {
   const [all, remote] = await Promise.all([
@@ -167,11 +167,8 @@ async function shop(
           ? p.live_stock <= 0
           : true,
     ),
-    pages = Math.max(1, Math.ceil(ps.length / 15)),
-    current = Math.min(Math.max(1, page), pages),
-    shown = ps.slice((current - 1) * 15, current * 15),
     rows: any[] = [];
-  for (const p of shown) {
+  for (const p of ps) {
     const icon =
       p.supplier_emoji_id && /^\d{10,}$/.test(p.supplier_emoji_id)
         ? `{${p.supplier_emoji_id}} `
@@ -183,12 +180,6 @@ async function shop(
       ),
     ]);
   }
-  const nav: any[] = [];
-  if (current > 1)
-    nav.push(cb("⬅️ Previous", `shop_page:${current - 1}:${filter}`));
-  if (current < pages)
-    nav.push(cb("➡️ Next", `shop_page:${current + 1}:${filter}`));
-  if (nav.length) rows.push(nav);
   rows.push(
     [
       cb("📋 All", "shop_page:1:all"),
@@ -201,7 +192,7 @@ async function shop(
     ctx,
     box(
       "🛍 SHOP",
-      `${ps.length ? "Choose a product:" : "No products found."}\n\nPage ${current} of ${pages} • ${ps.length} products`,
+      `${ps.length ? "Choose a product:" : "No products found."}\n\n${ps.length} products`,
     ),
     Markup.inlineKeyboard(rows),
   );
